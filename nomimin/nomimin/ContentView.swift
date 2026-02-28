@@ -145,16 +145,14 @@ class MidpointSearchService: ObservableObject {
     }
 
     private static func extractCoordinate(from item: MKMapItem) -> CLLocationCoordinate2D {
-        item.placemark.coordinate
+        item.location.coordinate
     }
 
     private static func toStationResult(_ item: MKMapItem) -> StationResult {
         let addr: String
-        if let locality = item.placemark.locality,
-           let subLocality = item.placemark.subLocality {
-            addr = "\(locality) \(subLocality)"
-        } else if let locality = item.placemark.locality {
-            addr = locality
+        if let mkAddress = item.address {
+            let parts = [mkAddress.locality, mkAddress.subLocality].compactMap { $0 }
+            addr = parts.joined(separator: " ")
         } else {
             addr = ""
         }
