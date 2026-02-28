@@ -1,4 +1,5 @@
 import SwiftUI
+import MapKit
 
 // MARK: - データモデル
 
@@ -40,6 +41,92 @@ struct DateSlot: Hashable, Comparable {
     }
 }
 
+// MARK: - 中間地点検索サービス
+
+@MainActor
+class MidpointSearchService: ObservableObject {
+    @Published var isSearching = false
+    @Published var nearbyStations: [MKMapItem] = []
+    @Published var centerCoordinate: CLLocationCoordinate2D?
+    @Published var errorMessage: String?
+
+    func search(stations: [String]) async {
+        guard !stations.isEmpty else { return }
+
+        isSearching = true
+        errorMessage = nil
+        nearbyStations = []
+        centerCoordinate = nil
+
+        var coordinates: [CLLocationCoordinate2D] = []
+
+        for station in stations {
+            let request = MKLocalSearch.Request()
+            let query = station.hasSuffix("駅") ? station : station + "駅"
+            request.naturalLanguageQuery = query
+            request.region = MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 35.6812, longitude: 139.7671),
+                span: MKCoordinateSpan(latitudeDelta: 10.0, longitudeDelta: 10.0)
+            )
+
+            let searchObj = MKLocalSearch(request: request)
+            let response = try? await withCheckedThrowingContinuation { (cont: CheckedContinuation<MKLocalSearch.Response, Error>) in
+                searchObj.start { response, error in
+                    if let error = error {
+                        cont.resume(throwing: error)
+                    } else if let response = response {
+                        cont.resume(returning: response)
+                    } else {
+                        cont.resume(throwing: NSError(domain: "MidpointSearch", code: -1))
+                    }
+                }
+            }
+
+            if let first = response?.mapItems.first {
+                coordinates.append(first.placemark.coordinate)
+            }
+        }
+
+        guard !coordinates.isEmpty else {
+            errorMessage = "駅の位置情報が取得できませんでした。\n駅名が正しいか確認してください。"
+            isSearching = false
+            return
+        }
+
+        let avgLat = coordinates.map { $0.latitude }.reduce(0, +) / Double(coordinates.count)
+        let avgLon = coordinates.map { $0.longitude }.reduce(0, +) / Double(coordinates.count)
+        let center = CLLocationCoordinate2D(latitude: avgLat, longitude: avgLon)
+        centerCoordinate = center
+
+        let nearbyRequest = MKLocalSearch.Request()
+        nearbyRequest.naturalLanguageQuery = "駅"
+        nearbyRequest.region = MKCoordinateRegion(
+            center: center,
+            span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
+        )
+
+        let nearbySearch = MKLocalSearch(request: nearbyRequest)
+        do {
+            let response = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<MKLocalSearch.Response, Error>) in
+                nearbySearch.start { response, error in
+                    if let error = error {
+                        cont.resume(throwing: error)
+                    } else if let response = response {
+                        cont.resume(returning: response)
+                    } else {
+                        cont.resume(throwing: NSError(domain: "MidpointSearch", code: -1))
+                    }
+                }
+            }
+            nearbyStations = Array(response.mapItems.prefix(5))
+        } catch {
+            errorMessage = "中間地点付近の駅を検索できませんでした。"
+        }
+
+        isSearching = false
+    }
+}
+
 // MARK: - メインビュー
 
 struct ContentView: View {
@@ -47,7 +134,15 @@ struct ContentView: View {
     @State private var dateSlots: [DateSlot] = []
     @State private var showingAddDate = false
     @State private var showingAddParticipant = false
+    @State private var showingMidpoint = false
     @State private var selectedDate = Date()
+
+    private var participantsWithStations: [String] {
+        participants.compactMap { p in
+            let s = p.nearestStation.trimmingCharacters(in: .whitespaces)
+            return s.isEmpty ? nil : s
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,6 +152,14 @@ struct ContentView: View {
                     .font(.title2.bold())
 
                 Spacer()
+
+                if participantsWithStations.count >= 2 {
+                    Button {
+                        showingMidpoint = true
+                    } label: {
+                        Label("中間地点を探す", systemImage: "mappin.and.ellipse")
+                    }
+                }
 
                 Button {
                     showingAddDate = true
@@ -102,6 +205,9 @@ struct ContentView: View {
             AddParticipantSheet(dateSlots: dateSlots) { newParticipant in
                 participants.append(newParticipant)
             }
+        }
+        .sheet(isPresented: $showingMidpoint) {
+            MidpointSheet(stations: participantsWithStations)
         }
     }
 
@@ -480,6 +586,180 @@ struct AddParticipantSheet: View {
         .onAppear {
             for slot in dateSlots {
                 availabilities[slot] = .yes
+            }
+        }
+    }
+}
+
+// MARK: - 中間地点シート
+
+struct MidpointSheet: View {
+    let stations: [String]
+
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var service = MidpointSearchService()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("中間地点を探す")
+                .font(.headline)
+                .padding()
+
+            Divider()
+
+            // 参加者の最寄駅一覧
+            VStack(alignment: .leading, spacing: 8) {
+                Text("参加者の最寄駅")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(stations.enumerated()), id: \.offset) { _, station in
+                            HStack(spacing: 4) {
+                                Image(systemName: "tram.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.blue)
+                                Text(station)
+                                    .font(.caption)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color.blue.opacity(0.1)))
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            // 結果エリア
+            Group {
+                if service.isSearching {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("中間地点を計算中...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let errorMsg = service.errorMessage {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.orange)
+                        Text(errorMsg)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if service.nearbyStations.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "mappin.and.ellipse")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary)
+                        Text("「再検索」ボタンで中間地点を探します")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            if let center = service.centerCoordinate {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "mappin.circle.fill")
+                                        .foregroundStyle(.red)
+                                    Text(String(format: "各駅の中間地点: 北緯%.3f° / 東経%.3f°", center.latitude, center.longitude))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal)
+                                .padding(.top, 12)
+                            }
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("中間地点に近い駅")
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal)
+
+                                ForEach(Array(service.nearbyStations.enumerated()), id: \.offset) { _, item in
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "tram.fill")
+                                            .font(.body)
+                                            .foregroundStyle(.purple)
+                                            .frame(width: 24)
+
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(item.name ?? "不明な駅")
+                                                .font(.body.weight(.medium))
+                                            if let locality = item.placemark.locality,
+                                               let subLocality = item.placemark.subLocality {
+                                                Text("\(locality) \(subLocality)")
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            } else if let locality = item.placemark.locality {
+                                                Text(locality)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+
+                                        Spacer()
+
+                                        Button {
+                                            item.openInMaps(launchOptions: nil)
+                                        } label: {
+                                            Label("地図", systemImage: "map")
+                                                .font(.caption)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(Color.purple.opacity(0.05))
+                                    )
+                                    .padding(.horizontal)
+                                }
+                            }
+                        }
+                        .padding(.bottom, 12)
+                    }
+                }
+            }
+
+            Divider()
+
+            HStack {
+                Button("閉じる") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("再検索") {
+                    Task {
+                        await service.search(stations: stations)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(service.isSearching)
+            }
+            .padding()
+        }
+        .frame(width: 420, height: 500)
+        .onAppear {
+            Task {
+                await service.search(stations: stations)
             }
         }
     }
