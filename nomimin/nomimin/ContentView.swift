@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import Combine
 
 // MARK: - データモデル
 
@@ -41,12 +42,25 @@ struct DateSlot: Hashable, Comparable {
     }
 }
 
+// MARK: - 中間地点検索結果
+
+struct StationResult: Identifiable {
+    let id = UUID()
+    let name: String
+    let address: String
+    let mapItem: MKMapItem
+
+    func openInMaps() {
+        mapItem.openInMaps(launchOptions: nil)
+    }
+}
+
 // MARK: - 中間地点検索サービス
 
 @MainActor
 class MidpointSearchService: ObservableObject {
     @Published var isSearching = false
-    @Published var nearbyStations: [MKMapItem] = []
+    @Published var nearbyStations: [StationResult] = []
     @Published var centerCoordinate: CLLocationCoordinate2D?
     @Published var errorMessage: String?
 
@@ -69,21 +83,8 @@ class MidpointSearchService: ObservableObject {
                 span: MKCoordinateSpan(latitudeDelta: 10.0, longitudeDelta: 10.0)
             )
 
-            let searchObj = MKLocalSearch(request: request)
-            let response = try? await withCheckedThrowingContinuation { (cont: CheckedContinuation<MKLocalSearch.Response, Error>) in
-                searchObj.start { response, error in
-                    if let error = error {
-                        cont.resume(throwing: error)
-                    } else if let response = response {
-                        cont.resume(returning: response)
-                    } else {
-                        cont.resume(throwing: NSError(domain: "MidpointSearch", code: -1))
-                    }
-                }
-            }
-
-            if let first = response?.mapItems.first {
-                coordinates.append(first.placemark.coordinate)
+            if let coord = await performSearch(request: request) {
+                coordinates.append(coord)
             }
         }
 
@@ -118,12 +119,46 @@ class MidpointSearchService: ObservableObject {
                     }
                 }
             }
-            nearbyStations = Array(response.mapItems.prefix(5))
+            nearbyStations = response.mapItems.prefix(5).map { Self.toStationResult($0) }
         } catch {
             errorMessage = "中間地点付近の駅を検索できませんでした。"
         }
 
         isSearching = false
+    }
+
+    private func performSearch(request: MKLocalSearch.Request) async -> CLLocationCoordinate2D? {
+        let searchObj = MKLocalSearch(request: request)
+        let response = try? await withCheckedThrowingContinuation { (cont: CheckedContinuation<MKLocalSearch.Response, Error>) in
+            searchObj.start { response, error in
+                if let error = error {
+                    cont.resume(throwing: error)
+                } else if let response = response {
+                    cont.resume(returning: response)
+                } else {
+                    cont.resume(throwing: NSError(domain: "MidpointSearch", code: -1))
+                }
+            }
+        }
+        guard let item = response?.mapItems.first else { return nil }
+        return Self.extractCoordinate(from: item)
+    }
+
+    private static func extractCoordinate(from item: MKMapItem) -> CLLocationCoordinate2D {
+        item.placemark.coordinate
+    }
+
+    private static func toStationResult(_ item: MKMapItem) -> StationResult {
+        let addr: String
+        if let locality = item.placemark.locality,
+           let subLocality = item.placemark.subLocality {
+            addr = "\(locality) \(subLocality)"
+        } else if let locality = item.placemark.locality {
+            addr = locality
+        } else {
+            addr = ""
+        }
+        return StationResult(name: item.name ?? "不明な駅", address: addr, mapItem: item)
     }
 }
 
@@ -690,7 +725,7 @@ struct MidpointSheet: View {
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal)
 
-                                ForEach(Array(service.nearbyStations.enumerated()), id: \.offset) { _, item in
+                                ForEach(service.nearbyStations) { station in
                                     HStack(spacing: 12) {
                                         Image(systemName: "tram.fill")
                                             .font(.body)
@@ -698,15 +733,10 @@ struct MidpointSheet: View {
                                             .frame(width: 24)
 
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(item.name ?? "不明な駅")
+                                            Text(station.name)
                                                 .font(.body.weight(.medium))
-                                            if let locality = item.placemark.locality,
-                                               let subLocality = item.placemark.subLocality {
-                                                Text("\(locality) \(subLocality)")
-                                                    .font(.caption)
-                                                    .foregroundStyle(.secondary)
-                                            } else if let locality = item.placemark.locality {
-                                                Text(locality)
+                                            if !station.address.isEmpty {
+                                                Text(station.address)
                                                     .font(.caption)
                                                     .foregroundStyle(.secondary)
                                             }
@@ -715,7 +745,7 @@ struct MidpointSheet: View {
                                         Spacer()
 
                                         Button {
-                                            item.openInMaps(launchOptions: nil)
+                                            station.openInMaps()
                                         } label: {
                                             Label("地図", systemImage: "map")
                                                 .font(.caption)
