@@ -14,9 +14,10 @@ import GoogleMobileAds
 @main
 struct nomiminApp: App {
     init() {
-        #if os(iOS)
-        MobileAds.shared.start()
-        #endif
+        // AdMob初期化は後で有効化
+        // #if os(iOS)
+        // MobileAds.shared.start()
+        // #endif
     }
 
     var body: some Scene {

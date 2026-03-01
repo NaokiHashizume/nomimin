@@ -730,10 +730,11 @@ struct ContentView: View {
                     scheduleTable
                 }
 
-                #if os(iOS)
-                BannerAdView()
-                    .frame(height: 50)
-                #endif
+                // AdMob広告は後で有効化
+                // #if os(iOS)
+                // BannerAdView()
+                //     .frame(height: 50)
+                // #endif
 
                 summaryBar
             }
