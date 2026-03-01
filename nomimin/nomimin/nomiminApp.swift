@@ -7,11 +7,21 @@
 
 import SwiftUI
 
+#if os(iOS)
+import GoogleMobileAds
+#endif
+
 @main
 struct nomiminApp: App {
+    init() {
+        #if os(iOS)
+        MobileAds.shared.start()
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            EventListView()
         }
     }
 }
