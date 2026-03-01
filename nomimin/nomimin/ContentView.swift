@@ -569,7 +569,7 @@ struct EventListView: View {
                     }
                 }
             }
-            .navigationTitle("のみにん")
+            .navigationTitle("のみみん")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.large)
             #endif
@@ -730,11 +730,10 @@ struct ContentView: View {
                     scheduleTable
                 }
 
-                // AdMob広告は後で有効化
-                // #if os(iOS)
-                // BannerAdView()
-                //     .frame(height: 50)
-                // #endif
+                #if os(iOS)
+                BannerAdView()
+                    .frame(height: 50)
+                #endif
 
                 summaryBar
             }
@@ -2674,7 +2673,6 @@ struct SplitBillSheet: View {
 struct BannerAdView: UIViewRepresentable {
     func makeUIView(context: Context) -> BannerView {
         let banner = BannerView(adSize: AdSizeBanner)
-        // テスト広告ユニットID（本番リリース前に差し替え）
         banner.adUnitID = "ca-app-pub-3940256099942544/2934735716"
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let root = windowScene.windows.first?.rootViewController {
