@@ -15,7 +15,7 @@ import GoogleMobileAds
 struct nomiminApp: App {
     init() {
         #if os(iOS)
-        GADMobileAds.sharedInstance().start(completionHandler: nil)
+        MobileAds.shared.start()
         #endif
     }
 

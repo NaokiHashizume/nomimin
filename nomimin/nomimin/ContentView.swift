@@ -516,6 +516,8 @@ struct EventListView: View {
     @StateObject private var store = EventStore()
     @State private var showingNewEvent = false
     @State private var newEventTitle = ""
+    @State private var editingEventID: UUID?
+    @State private var editingEventTitle = ""
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.auto.rawValue
 
     var body: some View {
@@ -543,6 +545,19 @@ struct EventListView: View {
                         ForEach(store.events.sorted(by: { $0.updatedAt > $1.updatedAt })) { event in
                             NavigationLink(value: event.id) {
                                 EventRow(event: event)
+                            }
+                            .contextMenu {
+                                Button {
+                                    editingEventTitle = event.title
+                                    editingEventID = event.id
+                                } label: {
+                                    Label("名前を変更", systemImage: "pencil")
+                                }
+                                Button(role: .destructive) {
+                                    store.deleteEvent(id: event.id)
+                                } label: {
+                                    Label("削除", systemImage: "trash")
+                                }
                             }
                         }
                         .onDelete { offsets in
@@ -607,6 +622,23 @@ struct EventListView: View {
             } message: {
                 Text("イベント名を入力してください")
             }
+            .alert("イベント名を変更", isPresented: Binding(
+                get: { editingEventID != nil },
+                set: { if !$0 { editingEventID = nil } }
+            )) {
+                TextField("イベント名", text: $editingEventTitle)
+                Button("変更") {
+                    let title = editingEventTitle.trimmingCharacters(in: .whitespaces)
+                    if !title.isEmpty, let id = editingEventID {
+                        if let index = store.events.firstIndex(where: { $0.id == id }) {
+                            store.events[index].title = title
+                            store.save()
+                        }
+                    }
+                    editingEventID = nil
+                }
+                Button("キャンセル", role: .cancel) { editingEventID = nil }
+            }
         }
         #if os(macOS)
         .frame(minWidth: 520, minHeight: 400)
@@ -668,10 +700,9 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                // 確定情報バナー
-                if let info = event.confirmedInfo {
+        VStack(spacing: 0) {
+            // 確定情報バナー
+            if let info = event.confirmedInfo {
                     confirmedBanner(info: info)
                     Divider()
                 }
@@ -706,54 +737,53 @@ struct ContentView: View {
 
                 summaryBar
             }
-            .navigationTitle(event.title)
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        showingAddDate = true
-                    } label: {
-                        Label("日程追加", systemImage: "calendar.badge.plus")
-                    }
+        .navigationTitle(event.title)
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    showingAddDate = true
+                } label: {
+                    Label("日程追加", systemImage: "calendar.badge.plus")
+                }
 
-                    Button {
-                        showingAddParticipant = true
-                    } label: {
-                        Label("参加者追加", systemImage: "person.badge.plus")
-                    }
-                    .disabled(event.dateSlots.isEmpty)
+                Button {
+                    showingAddParticipant = true
+                } label: {
+                    Label("参加者追加", systemImage: "person.badge.plus")
+                }
+                .disabled(event.dateSlots.isEmpty)
 
-                    Menu {
-                        if !event.participants.isEmpty {
-                            Button {
-                                showingConfirm = true
-                            } label: {
-                                Label("確定", systemImage: "checkmark.seal.fill")
-                            }
-
-                            Button {
-                                showingSplitBill = true
-                            } label: {
-                                Label("割り勘", systemImage: "yensign.circle")
-                            }
+                Menu {
+                    if !event.participants.isEmpty {
+                        Button {
+                            showingConfirm = true
+                        } label: {
+                            Label("確定", systemImage: "checkmark.seal.fill")
                         }
 
-                        if participantsWithStations.count >= 2 {
-                            Button {
-                                showingMidpoint = true
-                            } label: {
-                                Label("中間地点を探す", systemImage: "mappin.and.ellipse")
-                            }
+                        Button {
+                            showingSplitBill = true
+                        } label: {
+                            Label("割り勘", systemImage: "yensign.circle")
                         }
-
-                        if !event.participants.isEmpty || participantsWithStations.count >= 2 {
-                            Divider()
-                        }
-                    } label: {
-                        Label("その他", systemImage: "ellipsis.circle")
                     }
+
+                    if participantsWithStations.count >= 2 {
+                        Button {
+                            showingMidpoint = true
+                        } label: {
+                            Label("中間地点を探す", systemImage: "mappin.and.ellipse")
+                        }
+                    }
+
+                    if !event.participants.isEmpty || participantsWithStations.count >= 2 {
+                        Divider()
+                    }
+                } label: {
+                    Label("その他", systemImage: "ellipsis.circle")
                 }
             }
         }
@@ -2641,19 +2671,19 @@ struct SplitBillSheet: View {
 
 #if os(iOS)
 struct BannerAdView: UIViewRepresentable {
-    func makeUIView(context: Context) -> GADBannerView {
-        let banner = GADBannerView(adSize: GADAdSizeBanner)
+    func makeUIView(context: Context) -> BannerView {
+        let banner = BannerView(adSize: AdSizeBanner)
         // テスト広告ユニットID（本番リリース前に差し替え）
         banner.adUnitID = "ca-app-pub-3940256099942544/2934735716"
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let root = windowScene.windows.first?.rootViewController {
             banner.rootViewController = root
         }
-        banner.load(GADRequest())
+        banner.load(Request())
         return banner
     }
 
-    func updateUIView(_ uiView: GADBannerView, context: Context) {}
+    func updateUIView(_ uiView: BannerView, context: Context) {}
 }
 #endif
 
