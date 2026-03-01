@@ -7,6 +7,7 @@ import WebKit
 import AppKit
 #elseif os(iOS)
 import UIKit
+import GoogleMobileAds
 #endif
 
 // MARK: - プラットフォーム共通ユーティリティ
@@ -22,7 +23,7 @@ func copyToClipboard(_ text: String) {
 
 // MARK: - データモデル
 
-enum Availability: String, CaseIterable, Identifiable {
+enum Availability: String, CaseIterable, Identifiable, Codable {
     case yes = "◯"
     case maybe = "△"
     case no = "×"
@@ -38,14 +39,48 @@ enum Availability: String, CaseIterable, Identifiable {
     }
 }
 
-struct Participant: Identifiable {
-    let id = UUID()
+struct Participant: Identifiable, Codable {
+    let id: UUID
     var name: String
     var nearestStation: String
     var availabilities: [DateSlot: Availability]
+
+    init(id: UUID = UUID(), name: String, nearestStation: String, availabilities: [DateSlot: Availability]) {
+        self.id = id
+        self.name = name
+        self.nearestStation = nearestStation
+        self.availabilities = availabilities
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, nearestStation, availabilities
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(nearestStation, forKey: .nearestStation)
+        let pairs = availabilities.map { AvailabilityEntry(dateSlot: $0.key, availability: $0.value) }
+        try container.encode(pairs, forKey: .availabilities)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        nearestStation = try container.decode(String.self, forKey: .nearestStation)
+        let pairs = try container.decode([AvailabilityEntry].self, forKey: .availabilities)
+        availabilities = Dictionary(uniqueKeysWithValues: pairs.map { ($0.dateSlot, $0.availability) })
+    }
 }
 
-struct DateSlot: Hashable, Comparable {
+private struct AvailabilityEntry: Codable {
+    let dateSlot: DateSlot
+    let availability: Availability
+}
+
+struct DateSlot: Hashable, Comparable, Codable {
     let date: Date
 
     var display: String {
@@ -62,7 +97,7 @@ struct DateSlot: Hashable, Comparable {
 
 // MARK: - 確定情報
 
-struct ConfirmedInfo {
+struct ConfirmedInfo: Codable {
     var shopName: String
     var date: Date
     var time: Date
@@ -97,6 +132,107 @@ struct ConfirmedInfo {
             lines.append("  ・\(name)")
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - イベント管理
+
+enum EventStatus: String, Codable {
+    case planning = "調整中"
+    case confirmed = "確定"
+}
+
+struct Event: Identifiable, Codable {
+    let id: UUID
+    var title: String
+    var participants: [Participant]
+    var dateSlots: [DateSlot]
+    var confirmedInfo: ConfirmedInfo?
+    var createdAt: Date
+    var updatedAt: Date
+
+    init(id: UUID = UUID(), title: String, participants: [Participant] = [], dateSlots: [DateSlot] = [], confirmedInfo: ConfirmedInfo? = nil) {
+        self.id = id
+        self.title = title
+        self.participants = participants
+        self.dateSlots = dateSlots
+        self.confirmedInfo = confirmedInfo
+        self.createdAt = Date()
+        self.updatedAt = Date()
+    }
+
+    var status: EventStatus {
+        confirmedInfo != nil ? .confirmed : .planning
+    }
+
+    var dateRange: String? {
+        let sorted = dateSlots.sorted()
+        guard let first = sorted.first, let last = sorted.last else { return nil }
+        if first == last { return first.display }
+        return "\(first.display) ~ \(last.display)"
+    }
+}
+
+@MainActor
+class EventStore: ObservableObject {
+    @Published var events: [Event] = []
+
+    private static var fileURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDir = appSupport.appendingPathComponent("nomimin", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+        return appDir.appendingPathComponent("events.json")
+    }
+
+    init() {
+        load()
+    }
+
+    func load() {
+        guard FileManager.default.fileExists(atPath: Self.fileURL.path) else { return }
+        do {
+            let data = try Data(contentsOf: Self.fileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            events = try decoder.decode([Event].self, from: data)
+        } catch {
+            print("Failed to load events: \(error)")
+        }
+    }
+
+    func save() {
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(events)
+            try data.write(to: Self.fileURL, options: .atomic)
+        } catch {
+            print("Failed to save events: \(error)")
+        }
+    }
+
+    func addEvent(title: String) -> Event {
+        let event = Event(title: title)
+        events.append(event)
+        save()
+        return event
+    }
+
+    func deleteEvent(id: UUID) {
+        events.removeAll { $0.id == id }
+        save()
+    }
+
+    func binding(for eventID: UUID) -> Binding<Event>? {
+        guard let index = events.firstIndex(where: { $0.id == eventID }) else { return nil }
+        return Binding(
+            get: { self.events[index] },
+            set: { newValue in
+                self.events[index] = newValue
+                self.events[index].updatedAt = Date()
+                self.save()
+            }
+        )
     }
 }
 
@@ -179,12 +315,13 @@ struct ShopResult: Identifiable {
     let latitude: Double
     let longitude: Double
 
+    @MainActor
     func openInMaps() {
         let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
         let placemark = MKPlacemark(coordinate: coordinate)
         let mapItem = MKMapItem(placemark: placemark)
         mapItem.name = name
-        mapItem.openInMaps(launchOptions: nil)
+        mapItem.openInMaps()
     }
 }
 
@@ -322,7 +459,8 @@ class MidpointSearchService: ObservableObject {
                 shopErrorMessage = "この付近にホットペッパー掲載店が見つかりませんでした。"
             }
         } catch {
-            shopErrorMessage = "飲食店の検索に失敗しました。\nAPIキーを確認してください。"
+            print("HotPepper API error: \(error)")
+            shopErrorMessage = "飲食店の検索に失敗しました。\n\(error.localizedDescription)"
         }
 
         isSearchingShops = false
@@ -350,21 +488,180 @@ class MidpointSearchService: ObservableObject {
     }
 }
 
-// MARK: - メインビュー
+// MARK: - イベント一覧ビュー
+
+enum AppearanceMode: String, CaseIterable {
+    case auto = "自動"
+    case light = "ライト"
+    case dark = "ダーク"
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .auto: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .auto: return "circle.lefthalf.filled"
+        case .light: return "sun.max.fill"
+        case .dark: return "moon.fill"
+        }
+    }
+}
+
+struct EventListView: View {
+    @StateObject private var store = EventStore()
+    @State private var showingNewEvent = false
+    @State private var newEventTitle = ""
+    @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.auto.rawValue
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if store.events.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "party.popper")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.secondary)
+                        Text("飲み会イベントがありません")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                        Button {
+                            showingNewEvent = true
+                        } label: {
+                            Label("新しい飲み会を作成", systemImage: "plus.circle.fill")
+                                .font(.body.bold())
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(store.events.sorted(by: { $0.updatedAt > $1.updatedAt })) { event in
+                            NavigationLink(value: event.id) {
+                                EventRow(event: event)
+                            }
+                        }
+                        .onDelete { offsets in
+                            let sorted = store.events.sorted(by: { $0.updatedAt > $1.updatedAt })
+                            for offset in offsets {
+                                store.deleteEvent(id: sorted[offset].id)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("のみにん")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.large)
+            #endif
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        showingNewEvent = true
+                    } label: {
+                        Label("新規作成", systemImage: "plus")
+                    }
+
+                    Menu {
+                        Menu {
+                            ForEach(AppearanceMode.allCases, id: \.rawValue) { mode in
+                                Button {
+                                    appearanceMode = mode.rawValue
+                                } label: {
+                                    Label {
+                                        Text(mode.rawValue)
+                                    } icon: {
+                                        if appearanceMode == mode.rawValue {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("外観モード", systemImage: (AppearanceMode(rawValue: appearanceMode) ?? .auto).icon)
+                        }
+                    } label: {
+                        Label("設定", systemImage: "gearshape")
+                    }
+                }
+            }
+            .navigationDestination(for: UUID.self) { eventID in
+                if let binding = store.binding(for: eventID) {
+                    ContentView(event: binding)
+                }
+            }
+            .alert("新しい飲み会", isPresented: $showingNewEvent) {
+                TextField("イベント名", text: $newEventTitle)
+                Button("作成") {
+                    let title = newEventTitle.trimmingCharacters(in: .whitespaces)
+                    if !title.isEmpty {
+                        let _ = store.addEvent(title: title)
+                    }
+                    newEventTitle = ""
+                }
+                Button("キャンセル", role: .cancel) { newEventTitle = "" }
+            } message: {
+                Text("イベント名を入力してください")
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 520, minHeight: 400)
+        #endif
+        .preferredColorScheme((AppearanceMode(rawValue: appearanceMode) ?? .auto).colorScheme)
+    }
+}
+
+struct EventRow: View {
+    let event: Event
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(event.title)
+                    .font(.body.bold())
+
+                HStack(spacing: 8) {
+                    Label("\(event.participants.count)人", systemImage: "person.2")
+                    if let range = event.dateRange {
+                        Label(range, systemImage: "calendar")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Text(event.status.rawValue)
+                .font(.caption2.bold())
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule().fill(event.status == .confirmed ? Color.green.opacity(0.2) : Color.blue.opacity(0.2))
+                )
+                .foregroundStyle(event.status == .confirmed ? .green : .blue)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - メインビュー（イベント詳細）
 
 struct ContentView: View {
-    @State private var participants: [Participant] = []
-    @State private var dateSlots: [DateSlot] = []
+    @Binding var event: Event
     @State private var showingAddDate = false
     @State private var showingAddParticipant = false
     @State private var showingMidpoint = false
     @State private var showingSplitBill = false
     @State private var showingConfirm = false
-    @State private var confirmedInfo: ConfirmedInfo?
     @State private var editingStationIndex: Int?
 
     private var participantsWithStations: [String] {
-        participants.compactMap { p in
+        event.participants.compactMap { p in
             let s = p.nearestStation.trimmingCharacters(in: .whitespaces)
             return s.isEmpty ? nil : s
         }
@@ -374,13 +671,13 @@ struct ContentView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 // 確定情報バナー
-                if let info = confirmedInfo {
+                if let info = event.confirmedInfo {
                     confirmedBanner(info: info)
                     Divider()
                 }
 
                 // メインコンテンツ
-                if dateSlots.isEmpty {
+                if event.dateSlots.isEmpty {
                     emptyActionView(
                         icon: "calendar.badge.plus",
                         title: "日程を追加しましょう",
@@ -389,7 +686,7 @@ struct ContentView: View {
                     ) {
                         showingAddDate = true
                     }
-                } else if participants.isEmpty {
+                } else if event.participants.isEmpty {
                     emptyActionView(
                         icon: "person.2",
                         title: "参加者を追加しましょう",
@@ -402,9 +699,14 @@ struct ContentView: View {
                     scheduleTable
                 }
 
+                #if os(iOS)
+                BannerAdView()
+                    .frame(height: 50)
+                #endif
+
                 summaryBar
             }
-            .navigationTitle("飲み会日程調整")
+            .navigationTitle(event.title)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -421,73 +723,72 @@ struct ContentView: View {
                     } label: {
                         Label("参加者追加", systemImage: "person.badge.plus")
                     }
-                    .disabled(dateSlots.isEmpty)
+                    .disabled(event.dateSlots.isEmpty)
 
-                    if !participants.isEmpty || participantsWithStations.count >= 2 {
-                        Menu {
-                            if !participants.isEmpty {
-                                Button {
-                                    showingConfirm = true
-                                } label: {
-                                    Label("確定", systemImage: "checkmark.seal.fill")
-                                }
-
-                                Button {
-                                    showingSplitBill = true
-                                } label: {
-                                    Label("割り勘", systemImage: "yensign.circle")
-                                }
+                    Menu {
+                        if !event.participants.isEmpty {
+                            Button {
+                                showingConfirm = true
+                            } label: {
+                                Label("確定", systemImage: "checkmark.seal.fill")
                             }
 
-                            if participantsWithStations.count >= 2 {
-                                Button {
-                                    showingMidpoint = true
-                                } label: {
-                                    Label("中間地点を探す", systemImage: "mappin.and.ellipse")
-                                }
+                            Button {
+                                showingSplitBill = true
+                            } label: {
+                                Label("割り勘", systemImage: "yensign.circle")
                             }
-                        } label: {
-                            Label("その他", systemImage: "ellipsis.circle")
                         }
+
+                        if participantsWithStations.count >= 2 {
+                            Button {
+                                showingMidpoint = true
+                            } label: {
+                                Label("中間地点を探す", systemImage: "mappin.and.ellipse")
+                            }
+                        }
+
+                        if !event.participants.isEmpty || participantsWithStations.count >= 2 {
+                            Divider()
+                        }
+                    } label: {
+                        Label("その他", systemImage: "ellipsis.circle")
                     }
                 }
             }
         }
-        #if os(macOS)
-        .frame(minWidth: 520, minHeight: 400)
-        #endif
         .sheet(isPresented: $showingAddDate) {
-            AddDateSheet(dateSlots: $dateSlots)
+            AddDateSheet(dateSlots: $event.dateSlots)
         }
         .sheet(isPresented: $showingAddParticipant) {
-            AddParticipantSheet(dateSlots: dateSlots) { newParticipant in
-                participants.append(newParticipant)
+            AddParticipantSheet(dateSlots: event.dateSlots) { newParticipant in
+                event.participants.append(newParticipant)
             }
         }
         .sheet(isPresented: $showingMidpoint) {
             MidpointSheet(stations: participantsWithStations)
         }
         .sheet(isPresented: $showingSplitBill) {
-            SplitBillSheet(participantNames: participants.map { $0.name })
+            SplitBillSheet(participantNames: event.participants.map { $0.name })
         }
         .sheet(isPresented: $showingConfirm) {
             ConfirmSheet(
-                participantNames: participants.map { $0.name },
-                existingInfo: confirmedInfo
+                participantNames: event.participants.map { $0.name },
+                existingInfo: event.confirmedInfo
             ) { info in
-                confirmedInfo = info
+                event.confirmedInfo = info
             }
         }
         .sheet(isPresented: Binding(
             get: { editingStationIndex != nil },
             set: { if !$0 { editingStationIndex = nil } }
         )) {
-            if let index = editingStationIndex, index < participants.count {
+            if let index = editingStationIndex, index < event.participants.count {
                 EditStationSheet(
-                    name: participants[index].name,
-                    station: participants[index].nearestStation
+                    name: event.participants[index].name,
+                    station: event.participants[index].nearestStation
                 ) { newStation in
-                    participants[index].nearestStation = newStation
+                    event.participants[index].nearestStation = newStation
                 }
             }
         }
@@ -512,7 +813,7 @@ struct ContentView: View {
             Spacer()
 
             Button {
-                let summary = info.shareSummary(participants: participants.map { $0.name })
+                let summary = info.shareSummary(participants: event.participants.map { $0.name })
                 copyToClipboard(summary)
             } label: {
                 Label("共有", systemImage: "square.and.arrow.up")
@@ -522,7 +823,7 @@ struct ContentView: View {
             .controlSize(.small)
 
             Button {
-                confirmedInfo = nil
+                event.confirmedInfo = nil
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.caption)
@@ -573,7 +874,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     nameHeaderCell
                     Divider()
-                    ForEach(Array(participants.enumerated()), id: \.element.id) { index, participant in
+                    ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
                         nameCell(index: index, participant: participant)
                         Divider()
                     }
@@ -591,7 +892,7 @@ struct ContentView: View {
                     VStack(spacing: 0) {
                         dateHeaderRow
                         Divider()
-                        ForEach(Array(participants.enumerated()), id: \.element.id) { index, participant in
+                        ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
                             dateCellsRow(index: index, participant: participant)
                             Divider()
                         }
@@ -615,26 +916,44 @@ struct ContentView: View {
         .background(Color.gray.opacity(0.15))
     }
 
+    private var maxYesCount: Int {
+        guard !event.participants.isEmpty else { return 0 }
+        return event.dateSlots.map { slot in
+            event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
+        }.max() ?? 0
+    }
+
+    private func isTopSlot(_ slot: DateSlot) -> Bool {
+        guard !event.participants.isEmpty, maxYesCount > 0 else { return false }
+        let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
+        return yesCount == maxYesCount
+    }
+
     private func headerBackground(for slot: DateSlot) -> Color {
-        guard !participants.isEmpty else { return Color.gray.opacity(0.15) }
-        let yesCount = participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-        if yesCount == participants.count {
+        if isTopSlot(slot) {
             return Color.green.opacity(0.25)
         }
         return Color.gray.opacity(0.15)
     }
 
+    private func columnHighlight(for slot: DateSlot) -> Color {
+        if isTopSlot(slot) {
+            return Color.green.opacity(0.12)
+        }
+        return .clear
+    }
+
     private var dateHeaderRow: some View {
         HStack(spacing: 0) {
-            ForEach(dateSlots.sorted(), id: \.self) { slot in
-                let yesCount = participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-                let maybeCount = participants.filter { ($0.availabilities[slot] ?? .no) == .maybe }.count
+            ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+                let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
+                let maybeCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .maybe }.count
 
                 ZStack(alignment: .topTrailing) {
                     VStack(spacing: 2) {
                         Text(slot.display)
                             .font(.caption.bold())
-                        if !participants.isEmpty {
+                        if !event.participants.isEmpty {
                             HStack(spacing: 3) {
                                 Text("◯\(yesCount)")
                                     .foregroundStyle(.green)
@@ -649,9 +968,9 @@ struct ContentView: View {
 
                     Button {
                         withAnimation {
-                            dateSlots.removeAll { $0 == slot }
-                            for i in participants.indices {
-                                participants[i].availabilities.removeValue(forKey: slot)
+                            event.dateSlots.removeAll { $0 == slot }
+                            for i in event.participants.indices {
+                                event.participants[i].availabilities.removeValue(forKey: slot)
                             }
                         }
                     } label: {
@@ -707,7 +1026,7 @@ struct ContentView: View {
 
             Button {
                 withAnimation {
-                    participants.removeAll { $0.id == participant.id }
+                    event.participants.removeAll { $0.id == participant.id }
                 }
             } label: {
                 Image(systemName: "trash")
@@ -722,10 +1041,10 @@ struct ContentView: View {
     }
 
     private func dateCellsRow(index: Int, participant: Participant) -> some View {
-        let bgColor = index % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
+        let stripe = index % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
 
         return HStack(spacing: 0) {
-            ForEach(dateSlots.sorted(), id: \.self) { slot in
+            ForEach(event.dateSlots.sorted(), id: \.self) { slot in
                 let avail = participant.availabilities[slot] ?? .no
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -736,7 +1055,7 @@ struct ContentView: View {
                         .font(.title2)
                         .foregroundStyle(avail.color)
                         .frame(width: 80, height: 50)
-                        .background(bgColor)
+                        .background(columnHighlight(for: slot).overlay(stripe))
                 }
                 .buttonStyle(.plain)
             }
@@ -747,7 +1066,7 @@ struct ContentView: View {
 
     private var summaryBar: some View {
         Group {
-            if !dateSlots.isEmpty && !participants.isEmpty {
+            if !event.dateSlots.isEmpty && !event.participants.isEmpty {
                 VStack(spacing: 8) {
                     Divider()
 
@@ -819,9 +1138,9 @@ struct ContentView: View {
     }
 
     private var hasAllYesDate: Bool {
-        dateSlots.contains { slot in
-            let yesCount = participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-            return yesCount == participants.count
+        event.dateSlots.contains { slot in
+            let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
+            return yesCount == event.participants.count
         }
     }
 
@@ -836,14 +1155,14 @@ struct ContentView: View {
     }
 
     private func cycleAvailability(participantIndex: Int, slot: DateSlot) {
-        let current = participants[participantIndex].availabilities[slot] ?? .no
+        let current = event.participants[participantIndex].availabilities[slot] ?? .no
         let next: Availability
         switch current {
         case .yes:   next = .maybe
         case .maybe: next = .no
         case .no:    next = .yes
         }
-        participants[participantIndex].availabilities[slot] = next
+        event.participants[participantIndex].availabilities[slot] = next
     }
 }
 
@@ -2318,8 +2637,28 @@ struct SplitBillSheet: View {
     }
 }
 
+// MARK: - バナー広告
+
+#if os(iOS)
+struct BannerAdView: UIViewRepresentable {
+    func makeUIView(context: Context) -> GADBannerView {
+        let banner = GADBannerView(adSize: GADAdSizeBanner)
+        // テスト広告ユニットID（本番リリース前に差し替え）
+        banner.adUnitID = "ca-app-pub-3940256099942544/2934735716"
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let root = windowScene.windows.first?.rootViewController {
+            banner.rootViewController = root
+        }
+        banner.load(GADRequest())
+        return banner
+    }
+
+    func updateUIView(_ uiView: GADBannerView, context: Context) {}
+}
+#endif
+
 // MARK: - プレビュー
 
 #Preview {
-    ContentView()
+    EventListView()
 }
