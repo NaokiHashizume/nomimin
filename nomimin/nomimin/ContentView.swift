@@ -149,14 +149,7 @@ class MidpointSearchService: ObservableObject {
     }
 
     private static func toStationResult(_ item: MKMapItem) -> StationResult {
-        let addr: String
-        if let mkAddress = item.address {
-            let parts = [mkAddress.locality, mkAddress.subLocality].compactMap { $0 }
-            addr = parts.joined(separator: " ")
-        } else {
-            addr = ""
-        }
-        return StationResult(name: item.name ?? "不明な駅", address: addr, mapItem: item)
+        return StationResult(name: item.name ?? "不明な駅", address: "", mapItem: item)
     }
 }
 
