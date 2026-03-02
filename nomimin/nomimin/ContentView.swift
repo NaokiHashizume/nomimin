@@ -1673,7 +1673,7 @@ enum SearchSite: String, CaseIterable, Identifiable {
         let encoded = shopName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         switch self {
         case .hotpepper:
-            return nil // 直接URLで開くため、searchURLは不要
+            return URL(string: "https://www.hotpepper.jp/CSP/psh/rstLst/suggestRstLstAC/?suggestRestaurantSearch=1&key=\(encoded)")
         case .tabelog:
             return URL(string: "https://tabelog.com/rstLst/?vs=1&sw=\(encoded)")
         case .gurunavi:
@@ -1739,15 +1739,11 @@ struct WebView: NSViewRepresentable {
 
 struct InAppBrowserSheet: View {
     let shopName: String
-    let initialURL: URL?
     @Environment(\.dismiss) private var dismiss
     @State private var selectedSite: SearchSite = .hotpepper
     @State private var webView = WKWebView()
 
     private func urlForSite(_ site: SearchSite) -> URL? {
-        if site == .hotpepper {
-            return initialURL
-        }
         return site.searchURL(for: shopName)
     }
 
@@ -1807,27 +1803,25 @@ struct InAppBrowserSheet: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(SearchSite.allCases) { site in
-                        if site != .hotpepper || initialURL != nil {
-                            Button {
-                                if selectedSite != site {
-                                    selectedSite = site
-                                    if let url = urlForSite(site) {
-                                        webView.load(URLRequest(url: url))
-                                    }
+                        Button {
+                            if selectedSite != site {
+                                selectedSite = site
+                                if let url = urlForSite(site) {
+                                    webView.load(URLRequest(url: url))
                                 }
-                            } label: {
-                                Text(site.rawValue)
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .fill(selectedSite == site ? site.color.opacity(0.2) : Color.gray.opacity(0.1))
-                                    )
-                                    .foregroundStyle(selectedSite == site ? site.color : .secondary)
                             }
-                            .buttonStyle(.plain)
+                        } label: {
+                            Text(site.rawValue)
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(selectedSite == site ? site.color.opacity(0.2) : Color.gray.opacity(0.1))
+                                )
+                                .foregroundStyle(selectedSite == site ? site.color : .secondary)
                         }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal)
@@ -1851,12 +1845,6 @@ struct InAppBrowserSheet: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         #endif
-        .onAppear {
-            // 初期URLがなければ食べログをデフォルトに
-            if initialURL == nil {
-                selectedSite = .tabelog
-            }
-        }
     }
 }
 
@@ -1871,7 +1859,6 @@ struct MidpointSheet: View {
     @State private var selectedStation: StationResult?
     @State private var showingBrowser = false
     @State private var browserShopName = ""
-    @State private var browserURL: URL?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2058,7 +2045,7 @@ struct MidpointSheet: View {
             }
         }
         .sheet(isPresented: $showingBrowser) {
-            InAppBrowserSheet(shopName: browserShopName, initialURL: browserURL)
+            InAppBrowserSheet(shopName: browserShopName)
         }
     }
 
@@ -2168,7 +2155,6 @@ struct MidpointSheet: View {
                             if let couponURL = shop.couponURL {
                                 Button {
                                     browserShopName = shop.name
-                                    browserURL = couponURL
                                     showingBrowser = true
                                 } label: {
                                     Label("クーポン", systemImage: "ticket")
@@ -2181,7 +2167,6 @@ struct MidpointSheet: View {
 
                             Button {
                                 browserShopName = shop.name
-                                browserURL = shop.hotpepperURL
                                 showingBrowser = true
                             } label: {
                                 Label("予約", systemImage: "calendar.badge.clock")
