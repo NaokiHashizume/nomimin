@@ -1238,20 +1238,18 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
 
-                        if participantsWithStations.count >= 2 {
-                            Button {
-                                showingMidpoint = true
-                            } label: {
-                                Label("お店", systemImage: "mappin.and.ellipse")
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(Color.orange.opacity(0.1))
-                                    .foregroundStyle(.orange)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                            }
-                            .buttonStyle(.plain)
+                        Button {
+                            showingMidpoint = true
+                        } label: {
+                            Label("お店", systemImage: "mappin.and.ellipse")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.orange.opacity(0.1))
+                                .foregroundStyle(.orange)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
+                        .buttonStyle(.plain)
 
                         Button {
                             showingConfirm = true
@@ -1908,43 +1906,16 @@ struct MidpointSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @StateObject private var service = MidpointSearchService()
-    @State private var selectedStation: StationResult?
+    @State private var selectedStationKeyword: String?
     @State private var browserShop: (name: String, url: URL)?
+    @State private var customStationName = ""
+    @State private var isCustomSearch = false
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("中間地点を探す")
+            Text("お店の最寄駅を探す")
                 .font(.headline)
                 .padding()
-
-            Divider()
-
-            // 参加者の最寄駅一覧
-            VStack(alignment: .leading, spacing: 8) {
-                Text("参加者の最寄駅")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(stations.enumerated()), id: \.offset) { _, station in
-                            HStack(spacing: 4) {
-                                Image(systemName: "tram.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.blue)
-                                Text(station)
-                                    .font(.caption)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(Color.blue.opacity(0.1)))
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-            }
-            .padding(.vertical, 12)
 
             Divider()
 
@@ -1954,108 +1925,78 @@ struct MidpointSheet: View {
                     VStack(spacing: 12) {
                         ProgressView()
                             .scaleEffect(0.8)
-                        Text("中間地点を計算中...")
+                        Text("検索中...")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let errorMsg = service.errorMessage {
-                    VStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.orange)
-                        Text(errorMsg)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(spacing: 10) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.orange)
+                                Text(errorMsg)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 20)
+
+                            // 参加者の最寄駅
+                            if !stations.isEmpty {
+                                participantStationsList
+                            }
+
+                            // 別の駅で検索
+                            customStationSearchField
+
+                            if isCustomSearch || selectedStationKeyword != nil {
+                                Divider().padding(.vertical, 4)
+                                shopListSection
+                            }
+                        }
+                        .padding(.bottom, 12)
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if service.nearbyStations.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "mappin.and.ellipse")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.secondary)
-                        Text("「再検索」ボタンで中間地点を探します")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
-                            if let center = service.centerCoordinate {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "mappin.circle.fill")
-                                        .foregroundStyle(.red)
-                                    Text(String(format: "各駅の中間地点: 北緯%.3f° / 東経%.3f°", center.latitude, center.longitude))
-                                        .font(.caption)
+                            // 中間地点の駅
+                            if !service.nearbyStations.isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("中間地点の駅")
+                                        .font(.subheadline.bold())
                                         .foregroundStyle(.secondary)
-                                }
-                                .padding(.horizontal)
-                                .padding(.top, 12)
-                            }
+                                        .padding(.horizontal)
 
-                            // 中間地点に近い駅リスト
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("中間地点に近い駅（タップでお店検索）")
-                                    .font(.subheadline.bold())
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal)
-
-                                ForEach(service.nearbyStations) { station in
-                                    let isSelected = selectedStation?.id == station.id
-                                    Button {
-                                        withAnimation {
-                                            selectedStation = station
-                                        }
-                                        Task {
-                                            await service.searchShops(keyword: station.name)
-                                        }
-                                    } label: {
-                                        HStack(spacing: 12) {
-                                            Image(systemName: "tram.fill")
-                                                .font(.body)
-                                                .foregroundStyle(isSelected ? .white : .purple)
-                                                .frame(width: 24)
-
-                                            Text(station.name)
-                                                .font(.body.weight(.medium))
-                                                .foregroundStyle(isSelected ? .white : .primary)
-
-                                            Spacer()
-
-                                            if isSelected {
-                                                Image(systemName: "checkmark.circle.fill")
-                                                    .foregroundStyle(.white)
+                                    ForEach(service.nearbyStations) { station in
+                                        stationButton(name: station.name, isSelected: selectedStationKeyword == station.name, color: .purple) {
+                                            withAnimation {
+                                                selectedStationKeyword = station.name
+                                                isCustomSearch = false
+                                                customStationName = ""
                                             }
-
-                                            Button {
-                                                station.openInMaps()
-                                            } label: {
-                                                Label("地図", systemImage: "map")
-                                                    .font(.caption)
+                                            Task {
+                                                await service.searchShops(keyword: station.name)
                                             }
-                                            .buttonStyle(.bordered)
-                                            .controlSize(.small)
                                         }
                                     }
-                                    .buttonStyle(.plain)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .fill(isSelected ? Color.purple : Color.purple.opacity(0.05))
-                                    )
-                                    .padding(.horizontal)
                                 }
                             }
 
-                            // 飲食店リスト
-                            if selectedStation != nil {
-                                Divider()
-                                    .padding(.vertical, 4)
+                            // 参加者の最寄駅
+                            if !stations.isEmpty {
+                                participantStationsList
+                            }
 
+                            // 別の駅で検索
+                            customStationSearchField
+
+                            // 飲食店リスト
+                            if selectedStationKeyword != nil || isCustomSearch {
+                                Divider().padding(.vertical, 4)
                                 shopListSection
                             }
                         }
@@ -2073,7 +2014,8 @@ struct MidpointSheet: View {
                 Spacer()
 
                 Button("再検索") {
-                    selectedStation = nil
+                    selectedStationKeyword = nil
+                    isCustomSearch = false
                     Task {
                         await service.search(stations: stations)
                     }
@@ -2107,12 +2049,101 @@ struct MidpointSheet: View {
     // MARK: - 飲食店リストセクション
 
     @ViewBuilder
+    private var customStationSearchField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("別の駅で検索")
+                .font(.subheadline.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("駅名を入力", text: $customStationName)
+                    .textFieldStyle(.roundedBorder)
+                Button {
+                    let keyword = customStationName.trimmingCharacters(in: .whitespaces)
+                    guard !keyword.isEmpty else { return }
+                    withAnimation {
+                        selectedStationKeyword = nil
+                        isCustomSearch = true
+                    }
+                    Task {
+                        await service.searchShops(keyword: keyword)
+                    }
+                } label: {
+                    Text("検索")
+                        .font(.caption.bold())
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(customStationName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(.horizontal)
+        }
+        .padding(.top, 4)
+    }
+
+    private var participantStationsList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("参加者の最寄駅")
+                .font(.subheadline.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+
+            ForEach(Array(stations.enumerated()), id: \.offset) { _, name in
+                stationButton(name: name, isSelected: selectedStationKeyword == name, color: .blue) {
+                    withAnimation {
+                        selectedStationKeyword = name
+                        isCustomSearch = false
+                        customStationName = ""
+                    }
+                    Task {
+                        await service.searchShops(keyword: name)
+                    }
+                }
+            }
+        }
+    }
+
+    private func stationButton(name: String, isSelected: Bool, color: Color, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "tram.fill")
+                    .font(.body)
+                    .foregroundStyle(isSelected ? .white : color)
+                    .frame(width: 24)
+
+                Text(name)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(isSelected ? .white : .primary)
+
+                Spacer()
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? color : color.opacity(0.05))
+        )
+        .padding(.horizontal)
+    }
+
     private var shopListSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "fork.knife")
                     .foregroundStyle(.orange)
-                Text("\(selectedStation?.name ?? "")周辺のお店")
+                Text("\(selectedStationKeyword ?? customStationName)周辺のお店")
                     .font(.subheadline.bold())
                     .foregroundStyle(.secondary)
             }
