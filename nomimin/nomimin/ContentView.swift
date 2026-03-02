@@ -432,7 +432,7 @@ class MidpointSearchService: ObservableObject {
 
     private let hotpepperAPIKey = "8fb7a3475e5af02f"
 
-    func searchShops(near coordinate: CLLocationCoordinate2D) async {
+    func searchShops(keyword stationName: String) async {
         isSearchingShops = true
         shopErrorMessage = nil
         shops = []
@@ -440,10 +440,9 @@ class MidpointSearchService: ObservableObject {
         var components = URLComponents(string: "https://webservice.recruit.co.jp/hotpepper/gourmet/v1/")!
         components.queryItems = [
             URLQueryItem(name: "key", value: hotpepperAPIKey),
-            URLQueryItem(name: "lat", value: String(coordinate.latitude)),
-            URLQueryItem(name: "lng", value: String(coordinate.longitude)),
-            URLQueryItem(name: "range", value: "4"),
-            URLQueryItem(name: "count", value: "10"),
+            URLQueryItem(name: "keyword", value: stationName),
+            URLQueryItem(name: "order", value: "4"),
+            URLQueryItem(name: "count", value: "20"),
             URLQueryItem(name: "format", value: "json"),
         ]
 
@@ -1661,38 +1660,6 @@ struct EditStationSheet: View {
 
 // MARK: - アプリ内ブラウザ
 
-enum SearchSite: String, CaseIterable, Identifiable {
-    case hotpepper = "ホットペッパー"
-    case tabelog = "食べログ"
-    case gurunavi = "ぐるなび"
-    case google = "Google"
-
-    var id: String { rawValue }
-
-    func searchURL(for shopName: String) -> URL? {
-        let encoded = shopName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        switch self {
-        case .hotpepper:
-            return URL(string: "https://www.hotpepper.jp/CSP/psh/rstLst/suggestRstLstAC/?suggestRestaurantSearch=1&key=\(encoded)")
-        case .tabelog:
-            return URL(string: "https://tabelog.com/rstLst/?vs=1&sw=\(encoded)")
-        case .gurunavi:
-            return URL(string: "https://r.gnavi.co.jp/eki/result?freeword=\(encoded)")
-        case .google:
-            return URL(string: "https://www.google.com/search?q=\(encoded)+予約")
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .hotpepper: return .pink
-        case .tabelog: return .orange
-        case .gurunavi: return .red
-        case .google: return .blue
-        }
-    }
-}
-
 #if os(iOS)
 struct WebView: UIViewRepresentable {
     let url: URL
@@ -1737,42 +1704,29 @@ struct WebView: NSViewRepresentable {
 }
 #endif
 
-struct InAppBrowserSheet: View {
+struct HotPepperBrowserSheet: View {
     let shopName: String
+    let shopURL: URL
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedSite: SearchSite = .hotpepper
     @State private var webView = WKWebView()
-
-    private func urlForSite(_ site: SearchSite) -> URL? {
-        return site.searchURL(for: shopName)
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             // ナビバー
             HStack(spacing: 12) {
                 HStack(spacing: 4) {
-                    Button {
-                        webView.goBack()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.body)
+                    Button { webView.goBack() } label: {
+                        Image(systemName: "chevron.left").font(.body)
                     }
                     .buttonStyle(.plain)
 
-                    Button {
-                        webView.goForward()
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.body)
+                    Button { webView.goForward() } label: {
+                        Image(systemName: "chevron.right").font(.body)
                     }
                     .buttonStyle(.plain)
 
-                    Button {
-                        webView.reload()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.caption)
+                    Button { webView.reload() } label: {
+                        Image(systemName: "arrow.clockwise").font(.caption)
                     }
                     .buttonStyle(.plain)
                 }
@@ -1785,9 +1739,7 @@ struct InAppBrowserSheet: View {
 
                 Spacer()
 
-                Button {
-                    dismiss()
-                } label: {
+                Button { dismiss() } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
                         .foregroundStyle(.secondary)
@@ -1799,45 +1751,20 @@ struct InAppBrowserSheet: View {
 
             Divider()
 
-            // サイト切替タブ
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(SearchSite.allCases) { site in
-                        Button {
-                            if selectedSite != site {
-                                selectedSite = site
-                                if let url = urlForSite(site) {
-                                    webView.load(URLRequest(url: url))
-                                }
-                            }
-                        } label: {
-                            Text(site.rawValue)
-                                .font(.caption.bold())
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(selectedSite == site ? site.color.opacity(0.2) : Color.gray.opacity(0.1))
-                                )
-                                .foregroundStyle(selectedSite == site ? site.color : .secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal)
+            // ホットペッパーラベル
+            HStack(spacing: 4) {
+                Image(systemName: "flame.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.pink)
+                Text("ホットペッパー")
+                    .font(.caption.bold())
+                    .foregroundStyle(.pink)
             }
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
 
             Divider()
 
-            // WebView
-            if let url = urlForSite(selectedSite) {
-                WebView(url: url, webView: webView)
-            } else {
-                Text("URLが見つかりませんでした")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            WebView(url: shopURL, webView: webView)
         }
         #if os(macOS)
         .frame(width: 520, height: 680)
@@ -1857,8 +1784,7 @@ struct MidpointSheet: View {
     @Environment(\.openURL) private var openURL
     @StateObject private var service = MidpointSearchService()
     @State private var selectedStation: StationResult?
-    @State private var showingBrowser = false
-    @State private var browserShopName = ""
+    @State private var browserShop: (name: String, url: URL)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1959,8 +1885,7 @@ struct MidpointSheet: View {
                                             selectedStation = station
                                         }
                                         Task {
-                                            let coord = MidpointSheet.extractCoordinate(from: station.mapItem)
-                                            await service.searchShops(near: coord)
+                                            await service.searchShops(keyword: station.name)
                                         }
                                     } label: {
                                         HStack(spacing: 12) {
@@ -2044,8 +1969,13 @@ struct MidpointSheet: View {
                 await service.search(stations: stations)
             }
         }
-        .sheet(isPresented: $showingBrowser) {
-            InAppBrowserSheet(shopName: browserShopName)
+        .sheet(isPresented: Binding(
+            get: { browserShop != nil },
+            set: { if !$0 { browserShop = nil } }
+        )) {
+            if let shop = browserShop {
+                HotPepperBrowserSheet(shopName: shop.name, shopURL: shop.url)
+            }
         }
     }
 
@@ -2154,8 +2084,7 @@ struct MidpointSheet: View {
 
                             if let couponURL = shop.couponURL {
                                 Button {
-                                    browserShopName = shop.name
-                                    showingBrowser = true
+                                    browserShop = (name: shop.name, url: couponURL)
                                 } label: {
                                     Label("クーポン", systemImage: "ticket")
                                         .font(.caption)
@@ -2165,16 +2094,17 @@ struct MidpointSheet: View {
                                 .tint(.orange)
                             }
 
-                            Button {
-                                browserShopName = shop.name
-                                showingBrowser = true
-                            } label: {
-                                Label("予約", systemImage: "calendar.badge.clock")
-                                    .font(.caption)
+                            if let hpURL = shop.hotpepperURL {
+                                Button {
+                                    browserShop = (name: shop.name, url: hpURL)
+                                } label: {
+                                    Label("予約", systemImage: "calendar.badge.clock")
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .tint(.pink)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .tint(.green)
                         }
                     }
                     .padding(.horizontal, 12)
