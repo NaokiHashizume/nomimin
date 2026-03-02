@@ -682,7 +682,7 @@ struct EventRow: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 8) {
                             Label("\(event.participants.count)人", systemImage: "person.2")
-                            Label(info.displayDate, systemImage: "calendar")
+                            Label("\(info.displayDate) \(info.displayTime)〜", systemImage: "calendar")
                         }
                         Label(info.shopName, systemImage: "mappin.circle")
                     }
