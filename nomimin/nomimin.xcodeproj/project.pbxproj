@@ -7,16 +7,31 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		8ECFB2342F54AA6400801043 /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; platformFilters = (ios, ); productRef = 8ECFB2332F54AA6400801043 /* GoogleMobileAds */; };
+		8EC5FBF02F55E6EA00D6EAB2 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 8EC5FBEF2F55E6EA00D6EAB2 /* FirebaseAuth */; };
+		8EC5FBF22F55E6EA00D6EAB2 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = 8EC5FBF12F55E6EA00D6EAB2 /* FirebaseFirestore */; };
+		8ECFB2342F54AA6400801043 /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; platformFilter = ios; productRef = 8ECFB2332F54AA6400801043 /* GoogleMobileAds */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		69F49FF62F537A26008A2AAB /* nomimin.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = nomimin.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		5DF3545D6169463AB8C3DF03 /* Exceptions for "nomimin" folder in "nomimin" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 69F49FF52F537A26008A2AAB /* nomimin */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		69F49FF82F537A26008A2AAB /* nomimin */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				5DF3545D6169463AB8C3DF03 /* Exceptions for "nomimin" folder in "nomimin" target */,
+			);
 			path = nomimin;
 			sourceTree = "<group>";
 		};
@@ -28,6 +43,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				8ECFB2342F54AA6400801043 /* GoogleMobileAds in Frameworks */,
+				8EC5FBF02F55E6EA00D6EAB2 /* FirebaseAuth in Frameworks */,
+				8EC5FBF22F55E6EA00D6EAB2 /* FirebaseFirestore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +88,8 @@
 			name = nomimin;
 			packageProductDependencies = (
 				8ECFB2332F54AA6400801043 /* GoogleMobileAds */,
+				8EC5FBEF2F55E6EA00D6EAB2 /* FirebaseAuth */,
+				8EC5FBF12F55E6EA00D6EAB2 /* FirebaseFirestore */,
 			);
 			productName = nomimin;
 			productReference = 69F49FF62F537A26008A2AAB /* nomimin.app */;
@@ -102,6 +121,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				8ECFB2322F54AA6400801043 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */,
+				8EC5FBEE2F55E6EA00D6EAB2 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 69F49FF72F537A26008A2AAB /* Products */;
@@ -261,6 +281,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = nomimin/Info.plist;
 				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphoneos*]" = "ca-app-pub-3940256099942544~1458002511";
 				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphonesimulator*]" = "ca-app-pub-3940256099942544~1458002511";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -313,6 +334,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = nomimin/Info.plist;
 				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphoneos*]" = "ca-app-pub-3940256099942544~1458002511";
 				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphonesimulator*]" = "ca-app-pub-3940256099942544~1458002511";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -376,6 +398,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		8EC5FBEE2F55E6EA00D6EAB2 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.10.0;
+			};
+		};
 		8ECFB2322F54AA6400801043 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/googleads/swift-package-manager-google-mobile-ads.git";
@@ -387,10 +417,19 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		8EC5FBEF2F55E6EA00D6EAB2 /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8EC5FBEE2F55E6EA00D6EAB2 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+		8EC5FBF12F55E6EA00D6EAB2 /* FirebaseFirestore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8EC5FBEE2F55E6EA00D6EAB2 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFirestore;
+		};
 		8ECFB2332F54AA6400801043 /* GoogleMobileAds */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 8ECFB2322F54AA6400801043 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */;
-			platformFilters = (ios, );
 			productName = GoogleMobileAds;
 		};
 /* End XCSwiftPackageProductDependency section */

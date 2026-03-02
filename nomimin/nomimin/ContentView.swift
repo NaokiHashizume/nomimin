@@ -199,6 +199,14 @@ struct Event: Identifiable, Codable {
 class EventStore: ObservableObject {
     @Published var events: [Event] = []
 
+    private let firebase = FirebaseService.shared
+    /// Event.id (UUID) → Firestore document ID
+    private(set) var documentIDMap: [UUID: String] = [:]
+    /// Firestore書き込み中のイベントID（リスナー更新を一時抑制）
+    private var pendingWriteIDs: Set<UUID> = []
+
+    // MARK: - ローカルファイル（マイグレーション用）
+
     private static var fileURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let appDir = appSupport.appendingPathComponent("nomimin", isDirectory: true)
@@ -206,44 +214,72 @@ class EventStore: ObservableObject {
         return appDir.appendingPathComponent("events.json")
     }
 
-    init() {
-        load()
-    }
+    init() {}
 
-    func load() {
-        guard FileManager.default.fileExists(atPath: Self.fileURL.path) else { return }
-        do {
-            let data = try Data(contentsOf: Self.fileURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            events = try decoder.decode([Event].self, from: data)
-        } catch {
-            print("Failed to load events: \(error)")
+    // MARK: - リアルタイムリスナー開始
+
+    func startListening() {
+        firebase.listenToUserEvents { [weak self] eventMap in
+            guard let self = self else { return }
+            var newDocMap: [UUID: String] = [:]
+            var newEvents: [Event] = []
+            for (docID, event) in eventMap {
+                newDocMap[event.id] = docID
+                // 書き込み中のイベントはローカル版を優先
+                if self.pendingWriteIDs.contains(event.id),
+                   let existing = self.events.first(where: { $0.id == event.id }) {
+                    newEvents.append(existing)
+                } else {
+                    newEvents.append(event)
+                }
+            }
+            self.documentIDMap = newDocMap
+            self.events = newEvents
         }
     }
 
-    func save() {
-        do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(events)
-            try data.write(to: Self.fileURL, options: .atomic)
-        } catch {
-            print("Failed to save events: \(error)")
-        }
-    }
+    // MARK: - CRUD（Firestore）
 
-    func addEvent(title: String) -> Event {
+    func addEvent(title: String) async throws -> Event {
         let event = Event(title: title)
+        let docID = try await firebase.createEvent(event)
+        documentIDMap[event.id] = docID
         events.append(event)
-        save()
         return event
     }
 
-    func deleteEvent(id: UUID) {
+    func deleteEvent(id: UUID) async throws {
+        guard let docID = documentIDMap[id] else { return }
+        try await firebase.deleteEvent(documentID: docID)
+        documentIDMap.removeValue(forKey: id)
         events.removeAll { $0.id == id }
-        save()
     }
+
+    func updateEvent(_ event: Event) async throws {
+        guard let docID = documentIDMap[event.id] else { return }
+        pendingWriteIDs.insert(event.id)
+        defer { pendingWriteIDs.remove(event.id) }
+        try await firebase.updateEvent(event, documentID: docID)
+    }
+
+    // MARK: - イベント参加
+
+    func joinEvent(documentID: String) async throws -> Event? {
+        guard let event = try await firebase.joinEvent(documentID: documentID) else { return nil }
+        documentIDMap[event.id] = documentID
+        if !events.contains(where: { $0.id == event.id }) {
+            events.append(event)
+        }
+        return event
+    }
+
+    // MARK: - ドキュメントID取得
+
+    func documentID(for eventID: UUID) -> String? {
+        documentIDMap[eventID]
+    }
+
+    // MARK: - Binding（Firestore自動保存）
 
     func binding(for eventID: UUID) -> Binding<Event>? {
         guard let index = events.firstIndex(where: { $0.id == eventID }) else { return nil }
@@ -252,9 +288,107 @@ class EventStore: ObservableObject {
             set: { newValue in
                 self.events[index] = newValue
                 self.events[index].updatedAt = Date()
-                self.save()
+                Task {
+                    try? await self.updateEvent(self.events[index])
+                }
             }
         )
+    }
+
+    // MARK: - ローカルデータ マイグレーション
+
+    func migrateLocalEventsIfNeeded() async {
+        guard FileManager.default.fileExists(atPath: Self.fileURL.path) else { return }
+        do {
+            let data = try Data(contentsOf: Self.fileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let localEvents = try decoder.decode([Event].self, from: data)
+
+            for event in localEvents {
+                let docID = try await firebase.createEvent(event)
+                documentIDMap[event.id] = docID
+            }
+
+            // バックアップとして旧ファイルをリネーム
+            let backupURL = Self.fileURL.deletingLastPathComponent()
+                .appendingPathComponent("events_backup.json")
+            try FileManager.default.moveItem(at: Self.fileURL, to: backupURL)
+            print("Migrated \(localEvents.count) events to Firestore")
+        } catch {
+            print("Migration failed: \(error)")
+        }
+    }
+}
+
+// MARK: - イベント共有リンク
+
+struct SharedEventData: Codable {
+    let t: String         // title
+    let d: [TimeInterval] // dateSlots (timeIntervalSince1970)
+    let id: String        // original event UUID
+}
+
+struct EventShareCoder {
+    // MARK: - 新: Firestore docIDベースの短いURL
+
+    static func encodeShareLink(documentID: String, title: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "nomimin"
+        components.host = "join"
+        components.queryItems = [URLQueryItem(name: "id", value: documentID)]
+        return components.url
+    }
+
+    static func decodeShareLink(url: URL) -> String? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "nomimin",
+              components.host == "join",
+              let docID = components.queryItems?.first(where: { $0.name == "id" })?.value
+        else { return nil }
+        return docID
+    }
+
+    // MARK: - 旧: URL埋め込み方式（後方互換）
+
+    static func encode(event: Event) -> URL? {
+        let shared = SharedEventData(
+            t: event.title,
+            d: event.dateSlots.sorted().map { $0.date.timeIntervalSince1970 },
+            id: event.id.uuidString
+        )
+        guard let jsonData = try? JSONEncoder().encode(shared) else { return nil }
+
+        let compressed = (try? (jsonData as NSData).compressed(using: .zlib) as Data) ?? jsonData
+
+        let base64 = compressed.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
+        var components = URLComponents()
+        components.scheme = "nomimin"
+        components.host = "event"
+        components.queryItems = [URLQueryItem(name: "d", value: base64)]
+        return components.url
+    }
+
+    static func decode(url: URL) -> SharedEventData? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "nomimin",
+              components.host == "event",
+              let base64 = components.queryItems?.first(where: { $0.name == "d" })?.value
+        else { return nil }
+
+        var base64Std = base64
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64Std.count % 4
+        if remainder > 0 { base64Std += String(repeating: "=", count: 4 - remainder) }
+
+        guard let compressed = Data(base64Encoded: base64Std) else { return nil }
+        let jsonData = (try? (compressed as NSData).decompressed(using: .zlib) as Data) ?? compressed
+        return try? JSONDecoder().decode(SharedEventData.self, from: jsonData)
     }
 }
 
@@ -534,63 +668,139 @@ enum AppearanceMode: String, CaseIterable {
 }
 
 struct EventListView: View {
-    @StateObject private var store = EventStore()
+    @ObservedObject var store: EventStore
+    @Binding var pendingImport: SharedEventData?
+    @Binding var pendingJoinDocumentID: String?
     @State private var showingNewEvent = false
     @State private var newEventTitle = ""
     @State private var editingEventID: UUID?
     @State private var editingEventTitle = ""
     @State private var splitBillEventID: UUID?
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.auto.rawValue
+    @State private var showingClipboardError = false
+    @State private var joinPreviewEvent: Event?
+    @State private var joinDocID: String?
+    @State private var isLoadingJoin = false
+
+    private func importFromClipboard() {
+        #if os(iOS)
+        guard let text = UIPasteboard.general.string else {
+            showingClipboardError = true
+            return
+        }
+        #else
+        guard let text = NSPasteboard.general.string(forType: .string) else {
+            showingClipboardError = true
+            return
+        }
+        #endif
+
+        // 新: nomimin://join?id=xxx
+        if let range = text.range(of: "nomimin://join\\?id=[A-Za-z0-9]+", options: .regularExpression),
+           let url = URL(string: String(text[range])),
+           let docID = EventShareCoder.decodeShareLink(url: url) {
+            pendingJoinDocumentID = docID
+        }
+        // 旧: nomimin://event?d=xxx（後方互換）
+        else if let range = text.range(of: "nomimin://event\\?d=[A-Za-z0-9_-]+", options: .regularExpression),
+           let url = URL(string: String(text[range])),
+           let data = EventShareCoder.decode(url: url) {
+            pendingImport = data
+        } else {
+            showingClipboardError = true
+        }
+    }
+
+    private var settingsMenu: some View {
+        Menu {
+            Menu {
+                ForEach(AppearanceMode.allCases, id: \.rawValue) { mode in
+                    Button {
+                        appearanceMode = mode.rawValue
+                    } label: {
+                        Label {
+                            Text(mode.rawValue)
+                        } icon: {
+                            if appearanceMode == mode.rawValue {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label("外観モード", systemImage: (AppearanceMode(rawValue: appearanceMode) ?? .auto).icon)
+            }
+        } label: {
+            Label("設定", systemImage: "gearshape")
+        }
+    }
+
+    private var emptyStateView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "party.popper")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("飲み会イベントがありません")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Button {
+                showingNewEvent = true
+            } label: {
+                Label("新しい飲み会を作成", systemImage: "plus.circle.fill")
+                    .font(.body.bold())
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+                importFromClipboard()
+            } label: {
+                Label("招待リンクで参加", systemImage: "link")
+                    .font(.body.bold())
+            }
+            .buttonStyle(.bordered)
+            .tint(.teal)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var eventListContent: some View {
+        List {
+            ForEach(store.events.sorted(by: { $0.updatedAt > $1.updatedAt })) { event in
+                NavigationLink(value: event.id) {
+                    EventRow(event: event) {
+                        splitBillEventID = event.id
+                    }
+                }
+                .contextMenu {
+                    Button {
+                        editingEventTitle = event.title
+                        editingEventID = event.id
+                    } label: {
+                        Label("名前を変更", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        Task { try? await store.deleteEvent(id: event.id) }
+                    } label: {
+                        Label("削除", systemImage: "trash")
+                    }
+                }
+            }
+            .onDelete { offsets in
+                let sorted = store.events.sorted(by: { $0.updatedAt > $1.updatedAt })
+                for offset in offsets {
+                    Task { try? await store.deleteEvent(id: sorted[offset].id) }
+                }
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
             Group {
                 if store.events.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: "party.popper")
-                            .font(.system(size: 48))
-                            .foregroundStyle(.secondary)
-                        Text("飲み会イベントがありません")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                        Button {
-                            showingNewEvent = true
-                        } label: {
-                            Label("新しい飲み会を作成", systemImage: "plus.circle.fill")
-                                .font(.body.bold())
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    emptyStateView
                 } else {
-                    List {
-                        ForEach(store.events.sorted(by: { $0.updatedAt > $1.updatedAt })) { event in
-                            NavigationLink(value: event.id) {
-                                EventRow(event: event) {
-                                    splitBillEventID = event.id
-                                }
-                            }
-                            .contextMenu {
-                                Button {
-                                    editingEventTitle = event.title
-                                    editingEventID = event.id
-                                } label: {
-                                    Label("名前を変更", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    store.deleteEvent(id: event.id)
-                                } label: {
-                                    Label("削除", systemImage: "trash")
-                                }
-                            }
-                        }
-                        .onDelete { offsets in
-                            let sorted = store.events.sorted(by: { $0.updatedAt > $1.updatedAt })
-                            for offset in offsets {
-                                store.deleteEvent(id: sorted[offset].id)
-                            }
-                        }
-                    }
+                    eventListContent
                 }
             }
             .navigationTitle("のみみん")
@@ -599,85 +809,167 @@ struct EventListView: View {
             #endif
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        showingNewEvent = true
-                    } label: {
-                        Label("新規作成", systemImage: "plus")
-                    }
-
-                    Menu {
-                        Menu {
-                            ForEach(AppearanceMode.allCases, id: \.rawValue) { mode in
-                                Button {
-                                    appearanceMode = mode.rawValue
-                                } label: {
-                                    Label {
-                                        Text(mode.rawValue)
-                                    } icon: {
-                                        if appearanceMode == mode.rawValue {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }
-                                }
-                            }
-                        } label: {
-                            Label("外観モード", systemImage: (AppearanceMode(rawValue: appearanceMode) ?? .auto).icon)
-                        }
-                    } label: {
-                        Label("設定", systemImage: "gearshape")
-                    }
+                    Button { importFromClipboard() } label: { Label("招待リンクで参加", systemImage: "link") }
+                    Button { showingNewEvent = true } label: { Label("新規作成", systemImage: "plus") }
+                    settingsMenu
                 }
             }
             .navigationDestination(for: UUID.self) { eventID in
                 if let binding = store.binding(for: eventID) {
                     ContentView(event: binding)
+                        .environmentObject(store)
                 }
             }
-            .alert("新しい飲み会", isPresented: $showingNewEvent) {
-                TextField("イベント名", text: $newEventTitle)
-                Button("作成") {
-                    let title = newEventTitle.trimmingCharacters(in: .whitespaces)
-                    if !title.isEmpty {
-                        let _ = store.addEvent(title: title)
-                    }
-                    newEventTitle = ""
-                }
-                Button("キャンセル", role: .cancel) { newEventTitle = "" }
-            } message: {
-                Text("イベント名を入力してください")
+        }
+        .alert("新しい飲み会", isPresented: $showingNewEvent) {
+            TextField("イベント名", text: $newEventTitle)
+            Button("作成") {
+                let title = newEventTitle.trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty { Task { let _ = try? await store.addEvent(title: title) } }
+                newEventTitle = ""
             }
-            .alert("イベント名を変更", isPresented: Binding(
-                get: { editingEventID != nil },
-                set: { if !$0 { editingEventID = nil } }
-            )) {
-                TextField("イベント名", text: $editingEventTitle)
-                Button("変更") {
-                    let title = editingEventTitle.trimmingCharacters(in: .whitespaces)
-                    if !title.isEmpty, let id = editingEventID {
-                        if let index = store.events.firstIndex(where: { $0.id == id }) {
-                            store.events[index].title = title
-                            store.save()
-                        }
-                    }
-                    editingEventID = nil
+            Button("キャンセル", role: .cancel) { newEventTitle = "" }
+        } message: {
+            Text("イベント名を入力してください")
+        }
+        .alert("イベント名を変更", isPresented: Binding(
+            get: { editingEventID != nil },
+            set: { if !$0 { editingEventID = nil } }
+        )) {
+            TextField("イベント名", text: $editingEventTitle)
+            Button("変更") {
+                let title = editingEventTitle.trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty, let id = editingEventID,
+                   let index = store.events.firstIndex(where: { $0.id == id }) {
+                    store.events[index].title = title
+                    store.events[index].updatedAt = Date()
+                    Task { try? await store.updateEvent(store.events[index]) }
                 }
-                Button("キャンセル", role: .cancel) { editingEventID = nil }
+                editingEventID = nil
+            }
+            Button("キャンセル", role: .cancel) { editingEventID = nil }
+        }
+        .sheet(isPresented: Binding(
+            get: { splitBillEventID != nil },
+            set: { if !$0 { splitBillEventID = nil } }
+        )) {
+            if let id = splitBillEventID,
+               let event = store.events.first(where: { $0.id == id }) {
+                SplitBillSheet(participantNames: event.participants.map { $0.name })
+            }
+        }
+        .alert("招待リンクが見つかりません", isPresented: $showingClipboardError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("クリップボードに有効な招待リンクがありません。\n招待リンクをコピーしてから再度お試しください。")
+        }
+        .sheet(isPresented: Binding(
+            get: { joinDocID != nil || isLoadingJoin },
+            set: { if !$0 { joinDocID = nil; joinPreviewEvent = nil; isLoadingJoin = false } }
+        )) {
+            JoinEventSheet(store: store, joinDocID: $joinDocID, joinPreviewEvent: $joinPreviewEvent, isLoading: $isLoadingJoin)
+        }
+        .onChange(of: pendingJoinDocumentID) {
+            guard let docID = pendingJoinDocumentID else { return }
+            pendingJoinDocumentID = nil
+            if store.documentIDMap.values.contains(docID) { return }
+            joinDocID = docID
+            isLoadingJoin = true
+            Task {
+                joinPreviewEvent = try? await FirebaseService.shared.fetchEvent(documentID: docID)
+                isLoadingJoin = false
             }
         }
         #if os(macOS)
         .frame(minWidth: 520, minHeight: 400)
         #endif
         .preferredColorScheme((AppearanceMode(rawValue: appearanceMode) ?? .auto).colorScheme)
-        .sheet(isPresented: Binding(
-            get: { splitBillEventID != nil },
-            set: { if !$0 { splitBillEventID = nil } }
-        )) {
-            if let id = splitBillEventID, let event = store.events.first(where: { $0.id == id }) {
-                SplitBillSheet(participantNames: event.participants.map { $0.name })
-            }
-        }
     }
 }
+
+// MARK: - 参加確認シート
+
+struct JoinEventSheet: View {
+    @ObservedObject var store: EventStore
+    @Binding var joinDocID: String?
+    @Binding var joinPreviewEvent: Event?
+    @Binding var isLoading: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                if isLoading {
+                    Spacer()
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("イベント情報を取得中...")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                } else if let event = joinPreviewEvent, let docID = joinDocID {
+                    Spacer()
+                    Image(systemName: "envelope.open.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.teal)
+                    Text("イベントの招待")
+                        .font(.title2.bold())
+                    VStack(spacing: 8) {
+                        Text("「\(event.title)」")
+                            .font(.headline)
+                        HStack(spacing: 16) {
+                            Label("\(event.dateSlots.count)つの候補日", systemImage: "calendar")
+                            Label("\(event.participants.count)人参加中", systemImage: "person.2")
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Button {
+                        Task {
+                            let _ = try? await store.joinEvent(documentID: docID)
+                            joinDocID = nil
+                            joinPreviewEvent = nil
+                        }
+                    } label: {
+                        Label("参加する", systemImage: "checkmark.circle.fill")
+                            .font(.body.bold())
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.teal)
+                    Spacer()
+                } else {
+                    Spacer()
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.orange)
+                    Text("イベントが見つかりません")
+                        .font(.headline)
+                    Text("リンクが無効か、イベントが削除された可能性があります。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+            }
+            .padding(24)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") {
+                        joinDocID = nil
+                        joinPreviewEvent = nil
+                        isLoading = false
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+// MARK: - イベント行
 
 struct EventRow: View {
     let event: Event
@@ -690,7 +982,6 @@ struct EventRow: View {
                     .font(.body.bold())
 
                 if let info = event.confirmedInfo {
-                    // 確定済み: 参加者人数・日程・場所を表示
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 8) {
                             Label("\(event.participants.count)人", systemImage: "person.2")
@@ -701,7 +992,6 @@ struct EventRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 } else {
-                    // 調整中: 従来通り
                     HStack(spacing: 8) {
                         Label("\(event.participants.count)人", systemImage: "person.2")
                         if let range = event.dateRange {
@@ -715,7 +1005,7 @@ struct EventRow: View {
 
             Spacer()
 
-            if event.participants.count >= 2, let action = onSplitBill {
+            if event.confirmedInfo != nil, event.participants.count >= 2, let action = onSplitBill {
                 Button {
                     action()
                 } label: {
@@ -746,6 +1036,7 @@ struct EventRow: View {
 
 struct ContentView: View {
     @Binding var event: Event
+    @EnvironmentObject var store: EventStore
     @State private var showingAddDate = false
     @State private var showingAddParticipant = false
     @State private var showingMidpoint = false
@@ -758,23 +1049,6 @@ struct ContentView: View {
             let s = p.nearestStation.trimmingCharacters(in: .whitespaces)
             return s.isEmpty ? nil : s
         }
-    }
-
-    /// ハイライトされている（スコア最高の）日程の日付を返す
-    private var topSlotDate: Date? {
-        guard !event.participants.isEmpty, !event.dateSlots.isEmpty else { return nil }
-        let scores = event.dateSlots.map { slot -> (DateSlot, Int) in
-            let score = event.participants.reduce(0) { total, p in
-                switch p.availabilities[slot] ?? .no {
-                case .yes: return total + 2
-                case .maybe: return total + 1
-                case .no: return total + 0
-                }
-            }
-            return (slot, score)
-        }
-        guard let best = scores.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return nil }
-        return best.0.date
     }
 
     var body: some View {
@@ -844,7 +1118,7 @@ struct ContentView: View {
                         Button {
                             showingSplitBill = true
                         } label: {
-                            Label("割勘", systemImage: "yensign.circle")
+                            Label("割り勘", systemImage: "yensign.circle")
                         }
                     }
 
@@ -1020,30 +1294,30 @@ struct ContentView: View {
     private var scheduleTable: some View {
         ScrollView(.vertical) {
             HStack(alignment: .top, spacing: 0) {
-                // 固定名前列
+                // 固定日程列（左）
                 VStack(spacing: 0) {
-                    nameHeaderCell
+                    dateColumnHeader
                     Divider()
-                    ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
-                        nameCell(index: index, participant: participant)
+                    ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+                        dateRowCell(slot: slot)
                         Divider()
                     }
                 }
                 #if os(iOS)
-                .frame(width: 100)
+                .frame(width: 110)
                 #else
                 .frame(width: 130)
                 #endif
 
                 Divider()
 
-                // スクロール可能な日程列
+                // スクロール可能な参加者列（右）
                 ScrollView(.horizontal, showsIndicators: false) {
                     VStack(spacing: 0) {
-                        dateHeaderRow
+                        participantHeaderRow
                         Divider()
-                        ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
-                            dateCellsRow(index: index, participant: participant)
+                        ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+                            availabilityRow(slot: slot)
                             Divider()
                         }
                     }
@@ -1053,17 +1327,12 @@ struct ContentView: View {
         }
     }
 
-    private var nameHeaderCell: some View {
-        VStack(spacing: 1) {
-            Text("名前")
-                .font(.caption.bold())
-            Text("最寄駅")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 50)
-        .background(Color.gray.opacity(0.15))
+    private var dateColumnHeader: some View {
+        Text("日程")
+            .font(.caption.bold())
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .background(Color.gray.opacity(0.15))
     }
 
     /// 日程のスコアを計算（⚪︎=2点、△=1点、×=0点）
@@ -1101,35 +1370,49 @@ struct ContentView: View {
         return .clear
     }
 
-    private var dateHeaderRow: some View {
+    private var participantHeaderRow: some View {
         HStack(spacing: 0) {
-            ForEach(event.dateSlots.sorted(), id: \.self) { slot in
-                let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-                let maybeCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .maybe }.count
+            ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
+                let hasStation = !participant.nearestStation.trimmingCharacters(in: .whitespaces).isEmpty
 
                 ZStack(alignment: .topTrailing) {
-                    VStack(spacing: 2) {
-                        Text(slot.display)
-                            .font(.caption.bold())
-                        if !event.participants.isEmpty {
-                            HStack(spacing: 3) {
-                                Text("◯\(yesCount)")
-                                    .foregroundStyle(.green)
-                                Text("△\(maybeCount)")
-                                    .foregroundStyle(.orange)
+                    Button {
+                        editingStationIndex = index
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text(participant.name)
+                                .font(.caption.bold())
+                                .lineLimit(1)
+                            if hasStation {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "tram.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.blue)
+                                    Text(participant.nearestStation)
+                                        .font(.caption2)
+                                        .foregroundStyle(.blue)
+                                        .lineLimit(1)
+                                }
+                            } else {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "tram")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.secondary.opacity(0.5))
+                                    Text("最寄駅")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary.opacity(0.5))
+                                }
                             }
-                            .font(.system(size: 9))
                         }
+                        .frame(width: 80, height: 50)
+                        .background(Color.gray.opacity(0.15))
+                        .contentShape(Rectangle())
                     }
-                    .frame(width: 80, height: 50)
-                    .background(headerBackground(for: slot))
+                    .buttonStyle(.plain)
 
                     Button {
                         withAnimation {
-                            event.dateSlots.removeAll { $0 == slot }
-                            for i in event.participants.indices {
-                                event.participants[i].availabilities.removeValue(forKey: slot)
-                            }
+                            event.participants.removeAll { $0.id == participant.id }
                         }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -1143,48 +1426,35 @@ struct ContentView: View {
         }
     }
 
-    private func nameCell(index: Int, participant: Participant) -> some View {
-        let bgColor = index % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
-        let hasStation = !participant.nearestStation.trimmingCharacters(in: .whitespaces).isEmpty
+    private func dateRowCell(slot: DateSlot) -> some View {
+        let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
+        let maybeCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .maybe }.count
+        let slotIndex = event.dateSlots.sorted().firstIndex(of: slot) ?? 0
+        let stripe = slotIndex % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
 
         return HStack {
-            Button {
-                editingStationIndex = index
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(participant.name)
-                        .font(.caption)
-                        .lineLimit(1)
-                    if hasStation {
-                        HStack(spacing: 2) {
-                            Image(systemName: "tram.fill")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.blue)
-                            Text(participant.nearestStation)
-                                .font(.caption2)
-                                .foregroundStyle(.blue)
-                                .lineLimit(1)
-                        }
-                    } else {
-                        HStack(spacing: 2) {
-                            Image(systemName: "tram")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.secondary.opacity(0.5))
-                            Text("最寄駅を追加")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary.opacity(0.5))
-                        }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(slot.display)
+                    .font(.caption.bold())
+                if !event.participants.isEmpty {
+                    HStack(spacing: 3) {
+                        Text("◯\(yesCount)")
+                            .foregroundStyle(.green)
+                        Text("△\(maybeCount)")
+                            .foregroundStyle(.orange)
                     }
+                    .font(.system(size: 9))
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
 
             Spacer()
 
             Button {
                 withAnimation {
-                    event.participants.removeAll { $0.id == participant.id }
+                    event.dateSlots.removeAll { $0 == slot }
+                    for i in event.participants.indices {
+                        event.participants[i].availabilities.removeValue(forKey: slot)
+                    }
                 }
             } label: {
                 Image(systemName: "trash")
@@ -1195,14 +1465,15 @@ struct ContentView: View {
         }
         .frame(height: 50)
         .padding(.horizontal, 4)
-        .background(bgColor)
+        .background(headerBackground(for: slot).overlay(stripe))
     }
 
-    private func dateCellsRow(index: Int, participant: Participant) -> some View {
-        let stripe = index % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
+    private func availabilityRow(slot: DateSlot) -> some View {
+        let slotIndex = event.dateSlots.sorted().firstIndex(of: slot) ?? 0
+        let stripe = slotIndex % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
 
         return HStack(spacing: 0) {
-            ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+            ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
                 let avail = participant.availabilities[slot] ?? .no
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -1259,20 +1530,18 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
 
-                        if participantsWithStations.count >= 2 {
-                            Button {
-                                showingMidpoint = true
-                            } label: {
-                                Label("お店", systemImage: "mappin.and.ellipse")
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(Color.orange.opacity(0.1))
-                                    .foregroundStyle(.orange)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                            }
-                            .buttonStyle(.plain)
+                        Button {
+                            showingMidpoint = true
+                        } label: {
+                            Label("お店", systemImage: "mappin.and.ellipse")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.orange.opacity(0.1))
+                                .foregroundStyle(.orange)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
+                        .buttonStyle(.plain)
 
                         Button {
                             showingConfirm = true
@@ -1299,11 +1568,48 @@ struct ContentView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                         .buttonStyle(.plain)
+
+                        Button {
+                            if let docID = store.documentID(for: event.id),
+                               let url = EventShareCoder.encodeShareLink(documentID: docID, title: event.title) {
+                                let shareText = "「\(event.title)」の日程調整に参加してね！\n\(url.absoluteString)"
+                                #if os(iOS)
+                                presentShareSheet(text: shareText)
+                                #else
+                                copyToClipboard(shareText)
+                                #endif
+                            }
+                        } label: {
+                            Label("招待", systemImage: "link")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.teal.opacity(0.1))
+                                .foregroundStyle(.teal)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.bottom, 8)
                 }
             }
         }
+    }
+
+    private var topSlotDate: Date? {
+        guard !event.participants.isEmpty, !event.dateSlots.isEmpty else { return nil }
+        let scores = event.dateSlots.map { slot -> (DateSlot, Int) in
+            let score = event.participants.reduce(0) { total, p in
+                switch p.availabilities[slot] ?? .no {
+                case .yes: return total + 2
+                case .maybe: return total + 1
+                case .no: return total + 0
+                }
+            }
+            return (slot, score)
+        }
+        guard let best = scores.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return nil }
+        return best.0.date
     }
 
     private var hasAllYesDate: Bool {
@@ -1511,16 +1817,6 @@ struct AddDateSheet: View {
                             if index < days.count, let date = days[index] {
                                 dayCell(date: date)
                                     .frame(width: cellWidth, height: cellHeight)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        if !existingDateSet.contains(date) {
-                                            if pendingDates.contains(date) {
-                                                pendingDates.remove(date)
-                                            } else {
-                                                pendingDates.insert(date)
-                                            }
-                                        }
-                                    }
                             } else {
                                 Color.clear
                                     .frame(width: cellWidth, height: cellHeight)
@@ -1531,7 +1827,7 @@ struct AddDateSheet: View {
             }
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 10)
+                DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         if currentDragDates.isEmpty {
                             preDragPendingDates = pendingDates
@@ -1544,6 +1840,11 @@ struct AddDateSheet: View {
                         }
                     }
                     .onEnded { _ in
+                        if currentDragDates.count == 1, let date = currentDragDates.first {
+                            if preDragPendingDates.contains(date) {
+                                pendingDates.remove(date)
+                            }
+                        }
                         currentDragDates.removeAll()
                         preDragPendingDates.removeAll()
                     }
@@ -1918,43 +2219,16 @@ struct MidpointSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @StateObject private var service = MidpointSearchService()
-    @State private var selectedStation: StationResult?
+    @State private var selectedStationKeyword: String?
     @State private var browserShop: (name: String, url: URL)?
+    @State private var customStationName = ""
+    @State private var isCustomSearch = false
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("中間地点を探す")
+            Text("お店の最寄駅を探す")
                 .font(.headline)
                 .padding()
-
-            Divider()
-
-            // 参加者の最寄駅一覧
-            VStack(alignment: .leading, spacing: 8) {
-                Text("参加者の最寄駅")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(stations.enumerated()), id: \.offset) { _, station in
-                            HStack(spacing: 4) {
-                                Image(systemName: "tram.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.blue)
-                                Text(station)
-                                    .font(.caption)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(Color.blue.opacity(0.1)))
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-            }
-            .padding(.vertical, 12)
 
             Divider()
 
@@ -1964,108 +2238,78 @@ struct MidpointSheet: View {
                     VStack(spacing: 12) {
                         ProgressView()
                             .scaleEffect(0.8)
-                        Text("中間地点を計算中...")
+                        Text("検索中...")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let errorMsg = service.errorMessage {
-                    VStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.orange)
-                        Text(errorMsg)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(spacing: 10) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.orange)
+                                Text(errorMsg)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 20)
+
+                            // 参加者の最寄駅
+                            if !stations.isEmpty {
+                                participantStationsList
+                            }
+
+                            // 別の駅で検索
+                            customStationSearchField
+
+                            if isCustomSearch || selectedStationKeyword != nil {
+                                Divider().padding(.vertical, 4)
+                                shopListSection
+                            }
+                        }
+                        .padding(.bottom, 12)
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if service.nearbyStations.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "mappin.and.ellipse")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.secondary)
-                        Text("「再検索」ボタンで中間地点を探します")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
-                            if let center = service.centerCoordinate {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "mappin.circle.fill")
-                                        .foregroundStyle(.red)
-                                    Text(String(format: "各駅の中間地点: 北緯%.3f° / 東経%.3f°", center.latitude, center.longitude))
-                                        .font(.caption)
+                            // 中間地点の駅
+                            if !service.nearbyStations.isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("中間地点の駅")
+                                        .font(.subheadline.bold())
                                         .foregroundStyle(.secondary)
-                                }
-                                .padding(.horizontal)
-                                .padding(.top, 12)
-                            }
+                                        .padding(.horizontal)
 
-                            // 中間地点に近い駅リスト
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("中間地点に近い駅（タップでお店検索）")
-                                    .font(.subheadline.bold())
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal)
-
-                                ForEach(service.nearbyStations) { station in
-                                    let isSelected = selectedStation?.id == station.id
-                                    Button {
-                                        withAnimation {
-                                            selectedStation = station
-                                        }
-                                        Task {
-                                            await service.searchShops(keyword: station.name)
-                                        }
-                                    } label: {
-                                        HStack(spacing: 12) {
-                                            Image(systemName: "tram.fill")
-                                                .font(.body)
-                                                .foregroundStyle(isSelected ? .white : .purple)
-                                                .frame(width: 24)
-
-                                            Text(station.name)
-                                                .font(.body.weight(.medium))
-                                                .foregroundStyle(isSelected ? .white : .primary)
-
-                                            Spacer()
-
-                                            if isSelected {
-                                                Image(systemName: "checkmark.circle.fill")
-                                                    .foregroundStyle(.white)
+                                    ForEach(service.nearbyStations) { station in
+                                        stationButton(name: station.name, isSelected: selectedStationKeyword == station.name, color: .purple) {
+                                            withAnimation {
+                                                selectedStationKeyword = station.name
+                                                isCustomSearch = false
+                                                customStationName = ""
                                             }
-
-                                            Button {
-                                                station.openInMaps()
-                                            } label: {
-                                                Label("地図", systemImage: "map")
-                                                    .font(.caption)
+                                            Task {
+                                                await service.searchShops(keyword: station.name)
                                             }
-                                            .buttonStyle(.bordered)
-                                            .controlSize(.small)
                                         }
                                     }
-                                    .buttonStyle(.plain)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .fill(isSelected ? Color.purple : Color.purple.opacity(0.05))
-                                    )
-                                    .padding(.horizontal)
                                 }
                             }
 
-                            // 飲食店リスト
-                            if selectedStation != nil {
-                                Divider()
-                                    .padding(.vertical, 4)
+                            // 参加者の最寄駅
+                            if !stations.isEmpty {
+                                participantStationsList
+                            }
 
+                            // 別の駅で検索
+                            customStationSearchField
+
+                            // 飲食店リスト
+                            if selectedStationKeyword != nil || isCustomSearch {
+                                Divider().padding(.vertical, 4)
                                 shopListSection
                             }
                         }
@@ -2083,7 +2327,8 @@ struct MidpointSheet: View {
                 Spacer()
 
                 Button("再検索") {
-                    selectedStation = nil
+                    selectedStationKeyword = nil
+                    isCustomSearch = false
                     Task {
                         await service.search(stations: stations)
                     }
@@ -2117,12 +2362,101 @@ struct MidpointSheet: View {
     // MARK: - 飲食店リストセクション
 
     @ViewBuilder
+    private var customStationSearchField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("別の駅で検索")
+                .font(.subheadline.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("駅名を入力", text: $customStationName)
+                    .textFieldStyle(.roundedBorder)
+                Button {
+                    let keyword = customStationName.trimmingCharacters(in: .whitespaces)
+                    guard !keyword.isEmpty else { return }
+                    withAnimation {
+                        selectedStationKeyword = nil
+                        isCustomSearch = true
+                    }
+                    Task {
+                        await service.searchShops(keyword: keyword)
+                    }
+                } label: {
+                    Text("検索")
+                        .font(.caption.bold())
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(customStationName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(.horizontal)
+        }
+        .padding(.top, 4)
+    }
+
+    private var participantStationsList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("参加者の最寄駅")
+                .font(.subheadline.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+
+            ForEach(Array(stations.enumerated()), id: \.offset) { _, name in
+                stationButton(name: name, isSelected: selectedStationKeyword == name, color: .blue) {
+                    withAnimation {
+                        selectedStationKeyword = name
+                        isCustomSearch = false
+                        customStationName = ""
+                    }
+                    Task {
+                        await service.searchShops(keyword: name)
+                    }
+                }
+            }
+        }
+    }
+
+    private func stationButton(name: String, isSelected: Bool, color: Color, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "tram.fill")
+                    .font(.body)
+                    .foregroundStyle(isSelected ? .white : color)
+                    .frame(width: 24)
+
+                Text(name)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(isSelected ? .white : .primary)
+
+                Spacer()
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? color : color.opacity(0.05))
+        )
+        .padding(.horizontal)
+    }
+
     private var shopListSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "fork.knife")
                     .foregroundStyle(.orange)
-                Text("\(selectedStation?.name ?? "")周辺のお店")
+                Text("\(selectedStationKeyword ?? customStationName)周辺のお店")
                     .font(.subheadline.bold())
                     .foregroundStyle(.secondary)
             }
@@ -2416,11 +2750,9 @@ struct ConfirmSheet: View {
                 time = existing.time
                 memo = existing.memo
             } else {
-                // 新規: ハイライト日程をデフォルトにセット
                 if let topDate = topSlotDate {
                     date = topDate
                 }
-                // デフォルト時間を19:00にセット
                 var components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
                 components.hour = 19
                 components.minute = 0
@@ -2449,6 +2781,8 @@ struct SplitBillSheet: View {
     @State private var headCount: Int
     @State private var splitMode: SplitMode = .equal
     @State private var organizerIndex = 0
+    @State private var payerSelection = 0  // 0〜N-1: 参加者, N: その他
+    @State private var customPayerName = ""
 
     init(participantNames: [String]) {
         self.participantNames = participantNames
@@ -2457,6 +2791,14 @@ struct SplitBillSheet: View {
 
     private var totalAmount: Int {
         Int(totalAmountText) ?? 0
+    }
+
+    private var payerName: String {
+        if payerSelection < participantNames.count {
+            return participantNames[payerSelection]
+        }
+        let custom = customPayerName.trimmingCharacters(in: .whitespaces)
+        return custom.isEmpty ? "支払い者" : custom
     }
 
     /// 均等割り: 100円単位で切り上げ
@@ -2478,37 +2820,34 @@ struct SplitBillSheet: View {
         return totalAmount - memberAmount * (headCount - 1)
     }
 
+    private func amountFor(index: Int) -> Int {
+        if splitMode == .equal {
+            return equalPerPerson
+        } else {
+            return (index == organizerIndex && index < participantNames.count) ? organizerAmount : memberAmount
+        }
+    }
+
     private var resultSummary: String {
         guard totalAmount > 0, headCount > 0 else { return "" }
-        var lines: [String] = ["【割り勘計算結果】", "合計: ¥\(totalAmount)", "人数: \(headCount)人", ""]
+        var lines: [String] = ["【割り勘計算結果】", "合計: ¥\(totalAmount)", "人数: \(headCount)人", "支払い: \(payerName)", ""]
 
         if splitMode == .equal {
             lines.append("一人あたり: ¥\(equalPerPerson)")
-            lines.append("")
-            let count = min(headCount, participantNames.count)
-            let names = Array(participantNames[0..<count])
-            for name in names {
-                lines.append("  \(name): ¥\(equalPerPerson)")
-            }
-            if headCount > participantNames.count {
-                for i in (participantNames.count + 1)...headCount {
-                    lines.append("  参加者\(i): ¥\(equalPerPerson)")
-                }
-            }
         } else {
-            let organizerName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
-            lines.append("幹事(\(organizerName)): ¥\(organizerAmount)")
+            let orgName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
+            lines.append("幹事(\(orgName)): ¥\(organizerAmount)")
             lines.append("その他: ¥\(memberAmount)")
-            lines.append("")
-            let sliceCount = min(headCount, participantNames.count)
-            for (i, name) in participantNames[0..<sliceCount].enumerated() {
-                let amount = i == organizerIndex ? organizerAmount : memberAmount
-                lines.append("  \(name): ¥\(amount)")
-            }
-            if headCount > participantNames.count {
-                for i in (participantNames.count + 1)...headCount {
-                    lines.append("  参加者\(i): ¥\(memberAmount)")
-                }
+        }
+        lines.append("")
+        lines.append("▼ \(payerName)さんへの支払い")
+        for (i, name) in displayNames.enumerated() {
+            let amount = amountFor(index: i)
+            let isPayer = payerSelection < participantNames.count && i == payerSelection
+            if isPayer {
+                lines.append("  \(name)（支払い済み）")
+            } else {
+                lines.append("  \(name) → \(payerName): ¥\(amount)")
             }
         }
         return lines.joined(separator: "\n")
@@ -2570,6 +2909,28 @@ struct SplitBillSheet: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(headCount >= 50)
+                        }
+                    }
+                    .padding(.horizontal)
+
+                    // 支払い者
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("支払い者")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.secondary)
+
+                        Picker("支払い者", selection: $payerSelection) {
+                            ForEach(Array(participantNames.enumerated()), id: \.offset) { i, name in
+                                Text(name).tag(i)
+                            }
+                            Text("その他").tag(participantNames.count)
+                        }
+                        .frame(maxWidth: 200)
+
+                        if payerSelection == participantNames.count {
+                            TextField("支払い者の名前", text: $customPayerName)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 200)
                         }
                     }
                     .padding(.horizontal)
@@ -2636,12 +2997,12 @@ struct SplitBillSheet: View {
                                 )
                                 .padding(.horizontal)
                             } else {
-                                let organizerName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
+                                let orgName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
                                 VStack(spacing: 6) {
                                     HStack(spacing: 8) {
                                         Image(systemName: "star.fill")
                                             .foregroundStyle(.orange)
-                                        Text("幹事(\(organizerName))")
+                                        Text("幹事(\(orgName))")
                                             .font(.body)
                                         Spacer()
                                         Text("¥\(organizerAmount)")
@@ -2668,27 +3029,44 @@ struct SplitBillSheet: View {
                                 .padding(.horizontal)
                             }
 
-                            // 参加者別一覧
-                            VStack(alignment: .leading, spacing: 4) {
+                            // 支払い者への送金一覧
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "creditcard.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(.purple)
+                                    Text("\(payerName)さんへの支払い")
+                                        .font(.caption.bold())
+                                }
+                                .padding(.horizontal, 12)
+
                                 ForEach(Array(displayNames.enumerated()), id: \.offset) { i, name in
-                                    let amount = splitMode == .equal
-                                        ? equalPerPerson
-                                        : (i == organizerIndex && i < participantNames.count ? organizerAmount : memberAmount)
-                                    let isOrganizer = splitMode == .organizerPaysMore && i == organizerIndex && i < participantNames.count
+                                    let amount = amountFor(index: i)
+                                    let isPayer = payerSelection < participantNames.count && i == payerSelection
                                     HStack {
-                                        if isOrganizer {
-                                            Image(systemName: "star.fill")
-                                                .font(.caption2)
-                                                .foregroundStyle(.orange)
-                                        }
                                         Text(name)
                                             .font(.caption)
-                                        Spacer()
-                                        Text("¥\(amount)")
-                                            .font(.caption.bold())
+                                        if isPayer {
+                                            Spacer()
+                                            Text("支払い済み")
+                                                .font(.caption2)
+                                                .foregroundStyle(.green)
+                                        } else {
+                                            Image(systemName: "arrow.right")
+                                                .font(.system(size: 8))
+                                                .foregroundStyle(.secondary)
+                                            Text(payerName)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                            Spacer()
+                                            Text("¥\(amount)")
+                                                .font(.caption.bold())
+                                                .foregroundStyle(.purple)
+                                        }
                                     }
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 4)
+                                    .background(isPayer ? Color.green.opacity(0.05) : Color.clear)
                                 }
                             }
                             .padding(.horizontal)
@@ -2708,9 +3086,13 @@ struct SplitBillSheet: View {
 
                 if totalAmount > 0 {
                     Button {
+                        #if os(iOS)
+                        presentShareSheet(text: resultSummary)
+                        #else
                         copyToClipboard(resultSummary)
+                        #endif
                     } label: {
-                        Label("結果をコピー", systemImage: "doc.on.doc")
+                        Label("共有", systemImage: "square.and.arrow.up")
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -2718,7 +3100,7 @@ struct SplitBillSheet: View {
             .padding()
         }
         #if os(macOS)
-        .frame(width: 380, height: 520)
+        .frame(width: 380, height: 580)
         #else
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
@@ -2785,5 +3167,5 @@ struct BannerAdView: UIViewRepresentable {
 // MARK: - プレビュー
 
 #Preview {
-    EventListView()
+    EventListView(store: EventStore(), pendingImport: .constant(nil), pendingJoinDocumentID: .constant(nil))
 }
