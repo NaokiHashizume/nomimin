@@ -1020,30 +1020,30 @@ struct ContentView: View {
     private var scheduleTable: some View {
         ScrollView(.vertical) {
             HStack(alignment: .top, spacing: 0) {
-                // 固定名前列
+                // 固定日程列（左）
                 VStack(spacing: 0) {
-                    nameHeaderCell
+                    dateColumnHeader
                     Divider()
-                    ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
-                        nameCell(index: index, participant: participant)
+                    ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+                        dateRowCell(slot: slot)
                         Divider()
                     }
                 }
                 #if os(iOS)
-                .frame(width: 100)
+                .frame(width: 110)
                 #else
                 .frame(width: 130)
                 #endif
 
                 Divider()
 
-                // スクロール可能な日程列
+                // スクロール可能な参加者列（右）
                 ScrollView(.horizontal, showsIndicators: false) {
                     VStack(spacing: 0) {
-                        dateHeaderRow
+                        participantHeaderRow
                         Divider()
-                        ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
-                            dateCellsRow(index: index, participant: participant)
+                        ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+                            availabilityRow(slot: slot)
                             Divider()
                         }
                     }
@@ -1053,17 +1053,12 @@ struct ContentView: View {
         }
     }
 
-    private var nameHeaderCell: some View {
-        VStack(spacing: 1) {
-            Text("名前")
-                .font(.caption.bold())
-            Text("最寄駅")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 50)
-        .background(Color.gray.opacity(0.15))
+    private var dateColumnHeader: some View {
+        Text("日程")
+            .font(.caption.bold())
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .background(Color.gray.opacity(0.15))
     }
 
     /// 日程のスコアを計算（⚪︎=2点、△=1点、×=0点）
@@ -1101,35 +1096,49 @@ struct ContentView: View {
         return .clear
     }
 
-    private var dateHeaderRow: some View {
+    private var participantHeaderRow: some View {
         HStack(spacing: 0) {
-            ForEach(event.dateSlots.sorted(), id: \.self) { slot in
-                let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-                let maybeCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .maybe }.count
+            ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
+                let hasStation = !participant.nearestStation.trimmingCharacters(in: .whitespaces).isEmpty
 
                 ZStack(alignment: .topTrailing) {
-                    VStack(spacing: 2) {
-                        Text(slot.display)
-                            .font(.caption.bold())
-                        if !event.participants.isEmpty {
-                            HStack(spacing: 3) {
-                                Text("◯\(yesCount)")
-                                    .foregroundStyle(.green)
-                                Text("△\(maybeCount)")
-                                    .foregroundStyle(.orange)
+                    Button {
+                        editingStationIndex = index
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text(participant.name)
+                                .font(.caption.bold())
+                                .lineLimit(1)
+                            if hasStation {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "tram.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.blue)
+                                    Text(participant.nearestStation)
+                                        .font(.caption2)
+                                        .foregroundStyle(.blue)
+                                        .lineLimit(1)
+                                }
+                            } else {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "tram")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.secondary.opacity(0.5))
+                                    Text("最寄駅")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary.opacity(0.5))
+                                }
                             }
-                            .font(.system(size: 9))
                         }
+                        .frame(width: 80, height: 50)
+                        .background(Color.gray.opacity(0.15))
+                        .contentShape(Rectangle())
                     }
-                    .frame(width: 80, height: 50)
-                    .background(headerBackground(for: slot))
+                    .buttonStyle(.plain)
 
                     Button {
                         withAnimation {
-                            event.dateSlots.removeAll { $0 == slot }
-                            for i in event.participants.indices {
-                                event.participants[i].availabilities.removeValue(forKey: slot)
-                            }
+                            event.participants.removeAll { $0.id == participant.id }
                         }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -1143,48 +1152,35 @@ struct ContentView: View {
         }
     }
 
-    private func nameCell(index: Int, participant: Participant) -> some View {
-        let bgColor = index % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
-        let hasStation = !participant.nearestStation.trimmingCharacters(in: .whitespaces).isEmpty
+    private func dateRowCell(slot: DateSlot) -> some View {
+        let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
+        let maybeCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .maybe }.count
+        let slotIndex = event.dateSlots.sorted().firstIndex(of: slot) ?? 0
+        let stripe = slotIndex % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
 
         return HStack {
-            Button {
-                editingStationIndex = index
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(participant.name)
-                        .font(.caption)
-                        .lineLimit(1)
-                    if hasStation {
-                        HStack(spacing: 2) {
-                            Image(systemName: "tram.fill")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.blue)
-                            Text(participant.nearestStation)
-                                .font(.caption2)
-                                .foregroundStyle(.blue)
-                                .lineLimit(1)
-                        }
-                    } else {
-                        HStack(spacing: 2) {
-                            Image(systemName: "tram")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.secondary.opacity(0.5))
-                            Text("最寄駅を追加")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary.opacity(0.5))
-                        }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(slot.display)
+                    .font(.caption.bold())
+                if !event.participants.isEmpty {
+                    HStack(spacing: 3) {
+                        Text("◯\(yesCount)")
+                            .foregroundStyle(.green)
+                        Text("△\(maybeCount)")
+                            .foregroundStyle(.orange)
                     }
+                    .font(.system(size: 9))
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
 
             Spacer()
 
             Button {
                 withAnimation {
-                    event.participants.removeAll { $0.id == participant.id }
+                    event.dateSlots.removeAll { $0 == slot }
+                    for i in event.participants.indices {
+                        event.participants[i].availabilities.removeValue(forKey: slot)
+                    }
                 }
             } label: {
                 Image(systemName: "trash")
@@ -1195,14 +1191,15 @@ struct ContentView: View {
         }
         .frame(height: 50)
         .padding(.horizontal, 4)
-        .background(bgColor)
+        .background(headerBackground(for: slot).overlay(stripe))
     }
 
-    private func dateCellsRow(index: Int, participant: Participant) -> some View {
-        let stripe = index % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
+    private func availabilityRow(slot: DateSlot) -> some View {
+        let slotIndex = event.dateSlots.sorted().firstIndex(of: slot) ?? 0
+        let stripe = slotIndex % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
 
         return HStack(spacing: 0) {
-            ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+            ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
                 let avail = participant.availabilities[slot] ?? .no
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
