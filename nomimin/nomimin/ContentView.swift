@@ -714,7 +714,7 @@ struct EventRow: View {
 
             Spacer()
 
-            if event.participants.count >= 2, let action = onSplitBill {
+            if event.confirmedInfo != nil, event.participants.count >= 2, let action = onSplitBill {
                 Button {
                     action()
                 } label: {
@@ -2437,6 +2437,8 @@ struct SplitBillSheet: View {
     @State private var headCount: Int
     @State private var splitMode: SplitMode = .equal
     @State private var organizerIndex = 0
+    @State private var payerSelection = 0  // 0〜N-1: 参加者, N: その他
+    @State private var customPayerName = ""
 
     init(participantNames: [String]) {
         self.participantNames = participantNames
@@ -2445,6 +2447,14 @@ struct SplitBillSheet: View {
 
     private var totalAmount: Int {
         Int(totalAmountText) ?? 0
+    }
+
+    private var payerName: String {
+        if payerSelection < participantNames.count {
+            return participantNames[payerSelection]
+        }
+        let custom = customPayerName.trimmingCharacters(in: .whitespaces)
+        return custom.isEmpty ? "支払い者" : custom
     }
 
     /// 均等割り: 100円単位で切り上げ
@@ -2466,37 +2476,34 @@ struct SplitBillSheet: View {
         return totalAmount - memberAmount * (headCount - 1)
     }
 
+    private func amountFor(index: Int) -> Int {
+        if splitMode == .equal {
+            return equalPerPerson
+        } else {
+            return (index == organizerIndex && index < participantNames.count) ? organizerAmount : memberAmount
+        }
+    }
+
     private var resultSummary: String {
         guard totalAmount > 0, headCount > 0 else { return "" }
-        var lines: [String] = ["【割り勘計算結果】", "合計: ¥\(totalAmount)", "人数: \(headCount)人", ""]
+        var lines: [String] = ["【割り勘計算結果】", "合計: ¥\(totalAmount)", "人数: \(headCount)人", "支払い: \(payerName)", ""]
 
         if splitMode == .equal {
             lines.append("一人あたり: ¥\(equalPerPerson)")
-            lines.append("")
-            let count = min(headCount, participantNames.count)
-            let names = Array(participantNames[0..<count])
-            for name in names {
-                lines.append("  \(name): ¥\(equalPerPerson)")
-            }
-            if headCount > participantNames.count {
-                for i in (participantNames.count + 1)...headCount {
-                    lines.append("  参加者\(i): ¥\(equalPerPerson)")
-                }
-            }
         } else {
-            let organizerName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
-            lines.append("幹事(\(organizerName)): ¥\(organizerAmount)")
+            let orgName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
+            lines.append("幹事(\(orgName)): ¥\(organizerAmount)")
             lines.append("その他: ¥\(memberAmount)")
-            lines.append("")
-            let sliceCount = min(headCount, participantNames.count)
-            for (i, name) in participantNames[0..<sliceCount].enumerated() {
-                let amount = i == organizerIndex ? organizerAmount : memberAmount
-                lines.append("  \(name): ¥\(amount)")
-            }
-            if headCount > participantNames.count {
-                for i in (participantNames.count + 1)...headCount {
-                    lines.append("  参加者\(i): ¥\(memberAmount)")
-                }
+        }
+        lines.append("")
+        lines.append("▼ \(payerName)さんへの支払い")
+        for (i, name) in displayNames.enumerated() {
+            let amount = amountFor(index: i)
+            let isPayer = payerSelection < participantNames.count && i == payerSelection
+            if isPayer {
+                lines.append("  \(name)（支払い済み）")
+            } else {
+                lines.append("  \(name) → \(payerName): ¥\(amount)")
             }
         }
         return lines.joined(separator: "\n")
@@ -2558,6 +2565,28 @@ struct SplitBillSheet: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(headCount >= 50)
+                        }
+                    }
+                    .padding(.horizontal)
+
+                    // 支払い者
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("支払い者")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.secondary)
+
+                        Picker("支払い者", selection: $payerSelection) {
+                            ForEach(Array(participantNames.enumerated()), id: \.offset) { i, name in
+                                Text(name).tag(i)
+                            }
+                            Text("その他").tag(participantNames.count)
+                        }
+                        .frame(maxWidth: 200)
+
+                        if payerSelection == participantNames.count {
+                            TextField("支払い者の名前", text: $customPayerName)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 200)
                         }
                     }
                     .padding(.horizontal)
@@ -2624,12 +2653,12 @@ struct SplitBillSheet: View {
                                 )
                                 .padding(.horizontal)
                             } else {
-                                let organizerName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
+                                let orgName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
                                 VStack(spacing: 6) {
                                     HStack(spacing: 8) {
                                         Image(systemName: "star.fill")
                                             .foregroundStyle(.orange)
-                                        Text("幹事(\(organizerName))")
+                                        Text("幹事(\(orgName))")
                                             .font(.body)
                                         Spacer()
                                         Text("¥\(organizerAmount)")
@@ -2656,27 +2685,44 @@ struct SplitBillSheet: View {
                                 .padding(.horizontal)
                             }
 
-                            // 参加者別一覧
-                            VStack(alignment: .leading, spacing: 4) {
+                            // 支払い者への送金一覧
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "creditcard.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(.purple)
+                                    Text("\(payerName)さんへの支払い")
+                                        .font(.caption.bold())
+                                }
+                                .padding(.horizontal, 12)
+
                                 ForEach(Array(displayNames.enumerated()), id: \.offset) { i, name in
-                                    let amount = splitMode == .equal
-                                        ? equalPerPerson
-                                        : (i == organizerIndex && i < participantNames.count ? organizerAmount : memberAmount)
-                                    let isOrganizer = splitMode == .organizerPaysMore && i == organizerIndex && i < participantNames.count
+                                    let amount = amountFor(index: i)
+                                    let isPayer = payerSelection < participantNames.count && i == payerSelection
                                     HStack {
-                                        if isOrganizer {
-                                            Image(systemName: "star.fill")
-                                                .font(.caption2)
-                                                .foregroundStyle(.orange)
-                                        }
                                         Text(name)
                                             .font(.caption)
-                                        Spacer()
-                                        Text("¥\(amount)")
-                                            .font(.caption.bold())
+                                        if isPayer {
+                                            Spacer()
+                                            Text("支払い済み")
+                                                .font(.caption2)
+                                                .foregroundStyle(.green)
+                                        } else {
+                                            Image(systemName: "arrow.right")
+                                                .font(.system(size: 8))
+                                                .foregroundStyle(.secondary)
+                                            Text(payerName)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                            Spacer()
+                                            Text("¥\(amount)")
+                                                .font(.caption.bold())
+                                                .foregroundStyle(.purple)
+                                        }
                                     }
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 4)
+                                    .background(isPayer ? Color.green.opacity(0.05) : Color.clear)
                                 }
                             }
                             .padding(.horizontal)
@@ -2696,9 +2742,13 @@ struct SplitBillSheet: View {
 
                 if totalAmount > 0 {
                     Button {
+                        #if os(iOS)
+                        presentShareSheet(text: resultSummary)
+                        #else
                         copyToClipboard(resultSummary)
+                        #endif
                     } label: {
-                        Label("結果をコピー", systemImage: "doc.on.doc")
+                        Label("共有", systemImage: "square.and.arrow.up")
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -2706,7 +2756,7 @@ struct SplitBillSheet: View {
             .padding()
         }
         #if os(macOS)
-        .frame(width: 380, height: 520)
+        .frame(width: 380, height: 580)
         #else
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
