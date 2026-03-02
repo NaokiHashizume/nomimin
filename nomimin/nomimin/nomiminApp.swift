@@ -13,6 +13,9 @@ import GoogleMobileAds
 
 @main
 struct nomiminApp: App {
+    @StateObject private var store = EventStore()
+    @State private var pendingImport: SharedEventData?
+
     init() {
         #if os(iOS) && !targetEnvironment(simulator)
         MobileAds.shared.start()
@@ -21,7 +24,12 @@ struct nomiminApp: App {
 
     var body: some Scene {
         WindowGroup {
-            EventListView()
+            EventListView(store: store, pendingImport: $pendingImport)
+                .onOpenURL { url in
+                    if let data = EventShareCoder.decode(url: url) {
+                        pendingImport = data
+                    }
+                }
         }
     }
 }

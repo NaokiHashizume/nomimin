@@ -245,6 +245,19 @@ class EventStore: ObservableObject {
         save()
     }
 
+    func importEvent(from data: SharedEventData) {
+        if events.contains(where: { $0.id.uuidString == data.id }) { return }
+        let dateSlots = data.d.map { DateSlot(date: Date(timeIntervalSince1970: $0)) }
+        let event = Event(
+            id: UUID(uuidString: data.id) ?? UUID(),
+            title: data.t,
+            participants: [],
+            dateSlots: dateSlots
+        )
+        events.append(event)
+        save()
+    }
+
     func binding(for eventID: UUID) -> Binding<Event>? {
         guard let index = events.firstIndex(where: { $0.id == eventID }) else { return nil }
         return Binding(
@@ -255,6 +268,56 @@ class EventStore: ObservableObject {
                 self.save()
             }
         )
+    }
+}
+
+// MARK: - イベント共有リンク
+
+struct SharedEventData: Codable {
+    let t: String         // title
+    let d: [TimeInterval] // dateSlots (timeIntervalSince1970)
+    let id: String        // original event UUID
+}
+
+struct EventShareCoder {
+    static func encode(event: Event) -> URL? {
+        let shared = SharedEventData(
+            t: event.title,
+            d: event.dateSlots.sorted().map { $0.date.timeIntervalSince1970 },
+            id: event.id.uuidString
+        )
+        guard let jsonData = try? JSONEncoder().encode(shared) else { return nil }
+
+        let compressed = (try? (jsonData as NSData).compressed(using: .zlib) as Data) ?? jsonData
+
+        let base64 = compressed.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
+        var components = URLComponents()
+        components.scheme = "nomimin"
+        components.host = "event"
+        components.queryItems = [URLQueryItem(name: "d", value: base64)]
+        return components.url
+    }
+
+    static func decode(url: URL) -> SharedEventData? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "nomimin",
+              components.host == "event",
+              let base64 = components.queryItems?.first(where: { $0.name == "d" })?.value
+        else { return nil }
+
+        var base64Std = base64
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64Std.count % 4
+        if remainder > 0 { base64Std += String(repeating: "=", count: 4 - remainder) }
+
+        guard let compressed = Data(base64Encoded: base64Std) else { return nil }
+        let jsonData = (try? (compressed as NSData).decompressed(using: .zlib) as Data) ?? compressed
+        return try? JSONDecoder().decode(SharedEventData.self, from: jsonData)
     }
 }
 
@@ -534,7 +597,8 @@ enum AppearanceMode: String, CaseIterable {
 }
 
 struct EventListView: View {
-    @StateObject private var store = EventStore()
+    @ObservedObject var store: EventStore
+    @Binding var pendingImport: SharedEventData?
     @State private var showingNewEvent = false
     @State private var newEventTitle = ""
     @State private var editingEventID: UUID?
@@ -670,6 +734,22 @@ struct EventListView: View {
                 if let id = splitBillEventID,
                    let event = store.events.first(where: { $0.id == id }) {
                     SplitBillSheet(participantNames: event.participants.map { $0.name })
+                }
+            }
+            .alert("イベントの招待", isPresented: Binding(
+                get: { pendingImport != nil },
+                set: { if !$0 { pendingImport = nil } }
+            )) {
+                Button("参加する") {
+                    if let data = pendingImport {
+                        store.importEvent(from: data)
+                    }
+                    pendingImport = nil
+                }
+                Button("キャンセル", role: .cancel) { pendingImport = nil }
+            } message: {
+                if let data = pendingImport {
+                    Text("「\(data.t)」（\(data.d.count)つの候補日）\nに参加しますか？")
                 }
             }
         }
@@ -1276,6 +1356,28 @@ struct ContentView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                         .buttonStyle(.plain)
+
+                        if !event.dateSlots.isEmpty {
+                            Button {
+                                if let url = EventShareCoder.encode(event: event) {
+                                    let shareText = "「\(event.title)」の日程調整に参加してね！\n\(url.absoluteString)"
+                                    #if os(iOS)
+                                    presentShareSheet(text: shareText)
+                                    #else
+                                    copyToClipboard(shareText)
+                                    #endif
+                                }
+                            } label: {
+                                Label("招待", systemImage: "link")
+                                    .font(.caption.bold())
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(Color.teal.opacity(0.1))
+                                    .foregroundStyle(.teal)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                     .padding(.bottom, 8)
                 }

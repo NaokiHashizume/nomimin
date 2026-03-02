@@ -261,6 +261,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = nomimin/Info.plist;
 				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphoneos*]" = "ca-app-pub-3940256099942544~1458002511";
 				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphonesimulator*]" = "ca-app-pub-3940256099942544~1458002511";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -313,6 +314,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = nomimin/Info.plist;
 				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphoneos*]" = "ca-app-pub-3940256099942544~1458002511";
 				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphonesimulator*]" = "ca-app-pub-3940256099942544~1458002511";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
