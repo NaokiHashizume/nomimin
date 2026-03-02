@@ -539,6 +539,7 @@ struct EventListView: View {
     @State private var newEventTitle = ""
     @State private var editingEventID: UUID?
     @State private var editingEventTitle = ""
+    @State private var splitBillEventID: UUID?
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.auto.rawValue
 
     var body: some View {
@@ -565,7 +566,9 @@ struct EventListView: View {
                     List {
                         ForEach(store.events.sorted(by: { $0.updatedAt > $1.updatedAt })) { event in
                             NavigationLink(value: event.id) {
-                                EventRow(event: event)
+                                EventRow(event: event) {
+                                    splitBillEventID = event.id
+                                }
                             }
                             .contextMenu {
                                 Button {
@@ -665,11 +668,20 @@ struct EventListView: View {
         .frame(minWidth: 520, minHeight: 400)
         #endif
         .preferredColorScheme((AppearanceMode(rawValue: appearanceMode) ?? .auto).colorScheme)
+        .sheet(isPresented: Binding(
+            get: { splitBillEventID != nil },
+            set: { if !$0 { splitBillEventID = nil } }
+        )) {
+            if let id = splitBillEventID, let event = store.events.first(where: { $0.id == id }) {
+                SplitBillSheet(participantNames: event.participants.map { $0.name })
+            }
+        }
     }
 }
 
 struct EventRow: View {
     let event: Event
+    var onSplitBill: (() -> Void)?
 
     var body: some View {
         HStack {
@@ -703,6 +715,20 @@ struct EventRow: View {
 
             Spacer()
 
+            if event.participants.count >= 2, let action = onSplitBill {
+                Button {
+                    action()
+                } label: {
+                    Label("割勘", systemImage: "yensign.circle")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.purple.opacity(0.2)))
+                        .foregroundStyle(.purple)
+                }
+                .buttonStyle(.plain)
+            }
+
             Text(event.status.rawValue)
                 .font(.caption2.bold())
                 .padding(.horizontal, 8)
@@ -732,6 +758,23 @@ struct ContentView: View {
             let s = p.nearestStation.trimmingCharacters(in: .whitespaces)
             return s.isEmpty ? nil : s
         }
+    }
+
+    /// ハイライトされている（スコア最高の）日程の日付を返す
+    private var topSlotDate: Date? {
+        guard !event.participants.isEmpty, !event.dateSlots.isEmpty else { return nil }
+        let scores = event.dateSlots.map { slot -> (DateSlot, Int) in
+            let score = event.participants.reduce(0) { total, p in
+                switch p.availabilities[slot] ?? .no {
+                case .yes: return total + 2
+                case .maybe: return total + 1
+                case .no: return total + 0
+                }
+            }
+            return (slot, score)
+        }
+        guard let best = scores.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return nil }
+        return best.0.date
     }
 
     var body: some View {
@@ -801,7 +844,7 @@ struct ContentView: View {
                         Button {
                             showingSplitBill = true
                         } label: {
-                            Label("割り勘", systemImage: "yensign.circle")
+                            Label("割勘", systemImage: "yensign.circle")
                         }
                     }
 
@@ -838,7 +881,8 @@ struct ContentView: View {
         .sheet(isPresented: $showingConfirm) {
             ConfirmSheet(
                 participantNames: event.participants.map { $0.name },
-                existingInfo: event.confirmedInfo
+                existingInfo: event.confirmedInfo,
+                topSlotDate: topSlotDate
             ) { info in
                 event.confirmedInfo = info
             }
@@ -1192,7 +1236,7 @@ struct ContentView: View {
                         Button {
                             showingAddDate = true
                         } label: {
-                            Label("日程追加", systemImage: "calendar.badge.plus")
+                            Label("日程", systemImage: "calendar.badge.plus")
                                 .font(.caption.bold())
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
@@ -1205,7 +1249,7 @@ struct ContentView: View {
                         Button {
                             showingAddParticipant = true
                         } label: {
-                            Label("参加者追加", systemImage: "person.badge.plus")
+                            Label("追加", systemImage: "person.badge.plus")
                                 .font(.caption.bold())
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
@@ -1215,26 +1259,11 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
 
-                        if hasAllYesDate {
-                            Button {
-                                showingConfirm = true
-                            } label: {
-                                Label("確定する", systemImage: "checkmark.seal.fill")
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(Color.green.opacity(0.15))
-                                    .foregroundStyle(.green)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                            }
-                            .buttonStyle(.plain)
-                        }
-
                         if participantsWithStations.count >= 2 {
                             Button {
                                 showingMidpoint = true
                             } label: {
-                                Label("中間地点", systemImage: "mappin.and.ellipse")
+                                Label("お店", systemImage: "mappin.and.ellipse")
                                     .font(.caption.bold())
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 8)
@@ -1244,6 +1273,32 @@ struct ContentView: View {
                             }
                             .buttonStyle(.plain)
                         }
+
+                        Button {
+                            showingConfirm = true
+                        } label: {
+                            Label("確定", systemImage: "checkmark.seal.fill")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.green.opacity(0.15))
+                                .foregroundStyle(.green)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            showingSplitBill = true
+                        } label: {
+                            Label("割勘", systemImage: "yensign.circle")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.purple.opacity(0.1))
+                                .foregroundStyle(.purple)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.bottom, 8)
                 }
@@ -1456,6 +1511,16 @@ struct AddDateSheet: View {
                             if index < days.count, let date = days[index] {
                                 dayCell(date: date)
                                     .frame(width: cellWidth, height: cellHeight)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        if !existingDateSet.contains(date) {
+                                            if pendingDates.contains(date) {
+                                                pendingDates.remove(date)
+                                            } else {
+                                                pendingDates.insert(date)
+                                            }
+                                        }
+                                    }
                             } else {
                                 Color.clear
                                     .frame(width: cellWidth, height: cellHeight)
@@ -1466,7 +1531,7 @@ struct AddDateSheet: View {
             }
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 10)
                     .onChanged { value in
                         if currentDragDates.isEmpty {
                             preDragPendingDates = pendingDates
@@ -1479,11 +1544,6 @@ struct AddDateSheet: View {
                         }
                     }
                     .onEnded { _ in
-                        if currentDragDates.count == 1, let date = currentDragDates.first {
-                            if preDragPendingDates.contains(date) {
-                                pendingDates.remove(date)
-                            }
-                        }
                         currentDragDates.removeAll()
                         preDragPendingDates.removeAll()
                     }
@@ -2204,6 +2264,7 @@ struct MidpointSheet: View {
 struct ConfirmSheet: View {
     let participantNames: [String]
     let existingInfo: ConfirmedInfo?
+    let topSlotDate: Date?
     let onConfirm: (ConfirmedInfo) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -2354,6 +2415,18 @@ struct ConfirmSheet: View {
                 date = existing.date
                 time = existing.time
                 memo = existing.memo
+            } else {
+                // 新規: ハイライト日程をデフォルトにセット
+                if let topDate = topSlotDate {
+                    date = topDate
+                }
+                // デフォルト時間を19:00にセット
+                var components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+                components.hour = 19
+                components.minute = 0
+                if let t = Calendar.current.date(from: components) {
+                    time = t
+                }
             }
         }
     }
