@@ -677,14 +677,28 @@ struct EventRow: View {
                 Text(event.title)
                     .font(.body.bold())
 
-                HStack(spacing: 8) {
-                    Label("\(event.participants.count)人", systemImage: "person.2")
-                    if let range = event.dateRange {
-                        Label(range, systemImage: "calendar")
+                if let info = event.confirmedInfo {
+                    // 確定済み: 参加者人数・日程・場所を表示
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            Label("\(event.participants.count)人", systemImage: "person.2")
+                            Label(info.displayDate, systemImage: "calendar")
+                        }
+                        Label(info.shopName, systemImage: "mappin.circle")
                     }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else {
+                    // 調整中: 従来通り
+                    HStack(spacing: 8) {
+                        Label("\(event.participants.count)人", systemImage: "person.2")
+                        if let range = event.dateRange {
+                            Label(range, systemImage: "calendar")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
 
             Spacer()
