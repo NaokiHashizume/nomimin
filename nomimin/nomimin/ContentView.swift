@@ -605,6 +605,30 @@ struct EventListView: View {
     @State private var editingEventTitle = ""
     @State private var splitBillEventID: UUID?
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.auto.rawValue
+    @State private var showingClipboardError = false
+
+    private func importFromClipboard() {
+        #if os(iOS)
+        guard let text = UIPasteboard.general.string else {
+            showingClipboardError = true
+            return
+        }
+        #else
+        guard let text = NSPasteboard.general.string(forType: .string) else {
+            showingClipboardError = true
+            return
+        }
+        #endif
+
+        // テキストから nomimin:// URLを探す
+        if let range = text.range(of: "nomimin://event\\?d=[A-Za-z0-9_-]+", options: .regularExpression),
+           let url = URL(string: String(text[range])),
+           let data = EventShareCoder.decode(url: url) {
+            pendingImport = data
+        } else {
+            showingClipboardError = true
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -624,6 +648,15 @@ struct EventListView: View {
                                 .font(.body.bold())
                         }
                         .buttonStyle(.borderedProminent)
+
+                        Button {
+                            importFromClipboard()
+                        } label: {
+                            Label("招待リンクで参加", systemImage: "link")
+                                .font(.body.bold())
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.teal)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -663,6 +696,12 @@ struct EventListView: View {
             #endif
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        importFromClipboard()
+                    } label: {
+                        Label("招待リンクで参加", systemImage: "link")
+                    }
+
                     Button {
                         showingNewEvent = true
                     } label: {
@@ -751,6 +790,11 @@ struct EventListView: View {
                 if let data = pendingImport {
                     Text("「\(data.t)」（\(data.d.count)つの候補日）\nに参加しますか？")
                 }
+            }
+            .alert("招待リンクが見つかりません", isPresented: $showingClipboardError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("クリップボードに有効な招待リンクがありません。\n招待リンクをコピーしてから再度お試しください。")
             }
         }
         #if os(macOS)
