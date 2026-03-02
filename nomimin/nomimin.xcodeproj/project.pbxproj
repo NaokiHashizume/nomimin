@@ -14,9 +14,22 @@
 		69F49FF62F537A26008A2AAB /* nomimin.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = nomimin.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		5DF3545D6169463AB8C3DF03 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 69F49FF52F537A26008A2AAB /* nomimin */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		69F49FF82F537A26008A2AAB /* nomimin */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				5DF3545D6169463AB8C3DF03 /* PBXFileSystemSynchronizedBuildFileExceptionSet */,
+			);
 			path = nomimin;
 			sourceTree = "<group>";
 		};

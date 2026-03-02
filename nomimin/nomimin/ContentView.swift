@@ -2956,5 +2956,5 @@ struct BannerAdView: UIViewRepresentable {
 // MARK: - プレビュー
 
 #Preview {
-    EventListView()
+    EventListView(store: EventStore(), pendingImport: .constant(nil))
 }
