@@ -23,17 +23,23 @@ func copyToClipboard(_ text: String) {
     #endif
 }
 
-// MARK: - 共有シート
+// MARK: - 共有ユーティリティ
 
 #if os(iOS)
-struct ActivityShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+func presentShareSheet(text: String) {
+    guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+          let root = windowScene.windows.first?.rootViewController else { return }
+    var topVC = root
+    while let presented = topVC.presentedViewController {
+        topVC = presented
     }
-
-    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+    let activityVC = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+    if let popover = activityVC.popoverPresentationController {
+        popover.sourceView = topVC.view
+        popover.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+        popover.permittedArrowDirections = []
+    }
+    topVC.present(activityVC, animated: true)
 }
 #endif
 
@@ -705,7 +711,6 @@ struct ContentView: View {
     @State private var showingMidpoint = false
     @State private var showingSplitBill = false
     @State private var showingConfirm = false
-    @State private var showingShareSheet = false
     @State private var editingStationIndex: Int?
 
     private var participantsWithStations: [String] {
@@ -896,7 +901,11 @@ struct ContentView: View {
             // アクションボタン
             HStack(spacing: 12) {
                 Button {
-                    showingShareSheet = true
+                    #if os(iOS)
+                    presentShareSheet(text: info.shareSummary(participants: event.participants.map { $0.name }))
+                    #else
+                    copyToClipboard(info.shareSummary(participants: event.participants.map { $0.name }))
+                    #endif
                 } label: {
                     Label("共有", systemImage: "square.and.arrow.up")
                         .font(.caption)
@@ -915,12 +924,6 @@ struct ContentView: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
-            #if os(iOS)
-            .sheet(isPresented: $showingShareSheet) {
-                ActivityShareSheet(items: [info.shareSummary(participants: event.participants.map { $0.name })])
-                    .presentationDetents([.medium, .large])
-            }
-            #endif
         }
         .background(Color.green.opacity(0.06))
     }
@@ -2194,8 +2197,6 @@ struct ConfirmSheet: View {
     @State private var date = Date()
     @State private var time = Date()
     @State private var memo: String = ""
-    @State private var showingShare = false
-    @State private var shareContent = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2291,8 +2292,10 @@ struct ConfirmSheet: View {
                                 .padding(.horizontal)
 
                             Button {
-                                shareContent = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo).shareSummary(participants: participantNames)
-                                showingShare = true
+                                #if os(iOS)
+                                let text = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo).shareSummary(participants: participantNames)
+                                presentShareSheet(text: text)
+                                #endif
                             } label: {
                                 Label("共有", systemImage: "square.and.arrow.up")
                                     .font(.caption)
@@ -2339,12 +2342,6 @@ struct ConfirmSheet: View {
                 memo = existing.memo
             }
         }
-        #if os(iOS)
-        .sheet(isPresented: $showingShare) {
-            ActivityShareSheet(items: [shareContent])
-                .presentationDetents([.medium, .large])
-        }
-        #endif
     }
 }
 
