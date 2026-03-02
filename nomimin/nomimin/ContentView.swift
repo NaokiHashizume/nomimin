@@ -199,6 +199,14 @@ struct Event: Identifiable, Codable {
 class EventStore: ObservableObject {
     @Published var events: [Event] = []
 
+    private let firebase = FirebaseService.shared
+    /// Event.id (UUID) → Firestore document ID
+    private(set) var documentIDMap: [UUID: String] = [:]
+    /// Firestore書き込み中のイベントID（リスナー更新を一時抑制）
+    private var pendingWriteIDs: Set<UUID> = []
+
+    // MARK: - ローカルファイル（マイグレーション用）
+
     private static var fileURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let appDir = appSupport.appendingPathComponent("nomimin", isDirectory: true)
@@ -206,57 +214,72 @@ class EventStore: ObservableObject {
         return appDir.appendingPathComponent("events.json")
     }
 
-    init() {
-        load()
-    }
+    init() {}
 
-    func load() {
-        guard FileManager.default.fileExists(atPath: Self.fileURL.path) else { return }
-        do {
-            let data = try Data(contentsOf: Self.fileURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            events = try decoder.decode([Event].self, from: data)
-        } catch {
-            print("Failed to load events: \(error)")
+    // MARK: - リアルタイムリスナー開始
+
+    func startListening() {
+        firebase.listenToUserEvents { [weak self] eventMap in
+            guard let self = self else { return }
+            var newDocMap: [UUID: String] = [:]
+            var newEvents: [Event] = []
+            for (docID, event) in eventMap {
+                newDocMap[event.id] = docID
+                // 書き込み中のイベントはローカル版を優先
+                if self.pendingWriteIDs.contains(event.id),
+                   let existing = self.events.first(where: { $0.id == event.id }) {
+                    newEvents.append(existing)
+                } else {
+                    newEvents.append(event)
+                }
+            }
+            self.documentIDMap = newDocMap
+            self.events = newEvents
         }
     }
 
-    func save() {
-        do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(events)
-            try data.write(to: Self.fileURL, options: .atomic)
-        } catch {
-            print("Failed to save events: \(error)")
-        }
-    }
+    // MARK: - CRUD（Firestore）
 
-    func addEvent(title: String) -> Event {
+    func addEvent(title: String) async throws -> Event {
         let event = Event(title: title)
+        let docID = try await firebase.createEvent(event)
+        documentIDMap[event.id] = docID
         events.append(event)
-        save()
         return event
     }
 
-    func deleteEvent(id: UUID) {
+    func deleteEvent(id: UUID) async throws {
+        guard let docID = documentIDMap[id] else { return }
+        try await firebase.deleteEvent(documentID: docID)
+        documentIDMap.removeValue(forKey: id)
         events.removeAll { $0.id == id }
-        save()
     }
 
-    func importEvent(from data: SharedEventData) {
-        if events.contains(where: { $0.id.uuidString == data.id }) { return }
-        let dateSlots = data.d.map { DateSlot(date: Date(timeIntervalSince1970: $0)) }
-        let event = Event(
-            id: UUID(uuidString: data.id) ?? UUID(),
-            title: data.t,
-            participants: [],
-            dateSlots: dateSlots
-        )
-        events.append(event)
-        save()
+    func updateEvent(_ event: Event) async throws {
+        guard let docID = documentIDMap[event.id] else { return }
+        pendingWriteIDs.insert(event.id)
+        defer { pendingWriteIDs.remove(event.id) }
+        try await firebase.updateEvent(event, documentID: docID)
     }
+
+    // MARK: - イベント参加
+
+    func joinEvent(documentID: String) async throws -> Event? {
+        guard let event = try await firebase.joinEvent(documentID: documentID) else { return nil }
+        documentIDMap[event.id] = documentID
+        if !events.contains(where: { $0.id == event.id }) {
+            events.append(event)
+        }
+        return event
+    }
+
+    // MARK: - ドキュメントID取得
+
+    func documentID(for eventID: UUID) -> String? {
+        documentIDMap[eventID]
+    }
+
+    // MARK: - Binding（Firestore自動保存）
 
     func binding(for eventID: UUID) -> Binding<Event>? {
         guard let index = events.firstIndex(where: { $0.id == eventID }) else { return nil }
@@ -265,9 +288,36 @@ class EventStore: ObservableObject {
             set: { newValue in
                 self.events[index] = newValue
                 self.events[index].updatedAt = Date()
-                self.save()
+                Task {
+                    try? await self.updateEvent(self.events[index])
+                }
             }
         )
+    }
+
+    // MARK: - ローカルデータ マイグレーション
+
+    func migrateLocalEventsIfNeeded() async {
+        guard FileManager.default.fileExists(atPath: Self.fileURL.path) else { return }
+        do {
+            let data = try Data(contentsOf: Self.fileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let localEvents = try decoder.decode([Event].self, from: data)
+
+            for event in localEvents {
+                let docID = try await firebase.createEvent(event)
+                documentIDMap[event.id] = docID
+            }
+
+            // バックアップとして旧ファイルをリネーム
+            let backupURL = Self.fileURL.deletingLastPathComponent()
+                .appendingPathComponent("events_backup.json")
+            try FileManager.default.moveItem(at: Self.fileURL, to: backupURL)
+            print("Migrated \(localEvents.count) events to Firestore")
+        } catch {
+            print("Migration failed: \(error)")
+        }
     }
 }
 
@@ -280,6 +330,27 @@ struct SharedEventData: Codable {
 }
 
 struct EventShareCoder {
+    // MARK: - 新: Firestore docIDベースの短いURL
+
+    static func encodeShareLink(documentID: String, title: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "nomimin"
+        components.host = "join"
+        components.queryItems = [URLQueryItem(name: "id", value: documentID)]
+        return components.url
+    }
+
+    static func decodeShareLink(url: URL) -> String? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "nomimin",
+              components.host == "join",
+              let docID = components.queryItems?.first(where: { $0.name == "id" })?.value
+        else { return nil }
+        return docID
+    }
+
+    // MARK: - 旧: URL埋め込み方式（後方互換）
+
     static func encode(event: Event) -> URL? {
         let shared = SharedEventData(
             t: event.title,
@@ -599,6 +670,7 @@ enum AppearanceMode: String, CaseIterable {
 struct EventListView: View {
     @ObservedObject var store: EventStore
     @Binding var pendingImport: SharedEventData?
+    @Binding var pendingJoinDocumentID: String?
     @State private var showingNewEvent = false
     @State private var newEventTitle = ""
     @State private var editingEventID: UUID?
@@ -606,6 +678,9 @@ struct EventListView: View {
     @State private var splitBillEventID: UUID?
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.auto.rawValue
     @State private var showingClipboardError = false
+    @State private var joinPreviewEvent: Event?
+    @State private var joinDocID: String?
+    @State private var isLoadingJoin = false
 
     private func importFromClipboard() {
         #if os(iOS)
@@ -620,8 +695,14 @@ struct EventListView: View {
         }
         #endif
 
-        // テキストから nomimin:// URLを探す
-        if let range = text.range(of: "nomimin://event\\?d=[A-Za-z0-9_-]+", options: .regularExpression),
+        // 新: nomimin://join?id=xxx
+        if let range = text.range(of: "nomimin://join\\?id=[A-Za-z0-9]+", options: .regularExpression),
+           let url = URL(string: String(text[range])),
+           let docID = EventShareCoder.decodeShareLink(url: url) {
+            pendingJoinDocumentID = docID
+        }
+        // 旧: nomimin://event?d=xxx（後方互換）
+        else if let range = text.range(of: "nomimin://event\\?d=[A-Za-z0-9_-]+", options: .regularExpression),
            let url = URL(string: String(text[range])),
            let data = EventShareCoder.decode(url: url) {
             pendingImport = data
@@ -630,64 +711,96 @@ struct EventListView: View {
         }
     }
 
+    private var settingsMenu: some View {
+        Menu {
+            Menu {
+                ForEach(AppearanceMode.allCases, id: \.rawValue) { mode in
+                    Button {
+                        appearanceMode = mode.rawValue
+                    } label: {
+                        Label {
+                            Text(mode.rawValue)
+                        } icon: {
+                            if appearanceMode == mode.rawValue {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label("外観モード", systemImage: (AppearanceMode(rawValue: appearanceMode) ?? .auto).icon)
+            }
+        } label: {
+            Label("設定", systemImage: "gearshape")
+        }
+    }
+
+    private var emptyStateView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "party.popper")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("飲み会イベントがありません")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Button {
+                showingNewEvent = true
+            } label: {
+                Label("新しい飲み会を作成", systemImage: "plus.circle.fill")
+                    .font(.body.bold())
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+                importFromClipboard()
+            } label: {
+                Label("招待リンクで参加", systemImage: "link")
+                    .font(.body.bold())
+            }
+            .buttonStyle(.bordered)
+            .tint(.teal)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var eventListContent: some View {
+        List {
+            ForEach(store.events.sorted(by: { $0.updatedAt > $1.updatedAt })) { event in
+                NavigationLink(value: event.id) {
+                    EventRow(event: event) {
+                        splitBillEventID = event.id
+                    }
+                }
+                .contextMenu {
+                    Button {
+                        editingEventTitle = event.title
+                        editingEventID = event.id
+                    } label: {
+                        Label("名前を変更", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        Task { try? await store.deleteEvent(id: event.id) }
+                    } label: {
+                        Label("削除", systemImage: "trash")
+                    }
+                }
+            }
+            .onDelete { offsets in
+                let sorted = store.events.sorted(by: { $0.updatedAt > $1.updatedAt })
+                for offset in offsets {
+                    Task { try? await store.deleteEvent(id: sorted[offset].id) }
+                }
+            }
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Group {
                 if store.events.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: "party.popper")
-                            .font(.system(size: 48))
-                            .foregroundStyle(.secondary)
-                        Text("飲み会イベントがありません")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                        Button {
-                            showingNewEvent = true
-                        } label: {
-                            Label("新しい飲み会を作成", systemImage: "plus.circle.fill")
-                                .font(.body.bold())
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button {
-                            importFromClipboard()
-                        } label: {
-                            Label("招待リンクで参加", systemImage: "link")
-                                .font(.body.bold())
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.teal)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    emptyStateView
                 } else {
-                    List {
-                        ForEach(store.events.sorted(by: { $0.updatedAt > $1.updatedAt })) { event in
-                            NavigationLink(value: event.id) {
-                                EventRow(event: event) {
-                                    splitBillEventID = event.id
-                                }
-                            }
-                            .contextMenu {
-                                Button {
-                                    editingEventTitle = event.title
-                                    editingEventID = event.id
-                                } label: {
-                                    Label("名前を変更", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    store.deleteEvent(id: event.id)
-                                } label: {
-                                    Label("削除", systemImage: "trash")
-                                }
-                            }
-                        }
-                        .onDelete { offsets in
-                            let sorted = store.events.sorted(by: { $0.updatedAt > $1.updatedAt })
-                            for offset in offsets {
-                                store.deleteEvent(id: sorted[offset].id)
-                            }
-                        }
-                    }
+                    eventListContent
                 }
             }
             .navigationTitle("のみみん")
@@ -696,105 +809,75 @@ struct EventListView: View {
             #endif
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        importFromClipboard()
-                    } label: {
-                        Label("招待リンクで参加", systemImage: "link")
-                    }
-
-                    Button {
-                        showingNewEvent = true
-                    } label: {
-                        Label("新規作成", systemImage: "plus")
-                    }
-
-                    Menu {
-                        Menu {
-                            ForEach(AppearanceMode.allCases, id: \.rawValue) { mode in
-                                Button {
-                                    appearanceMode = mode.rawValue
-                                } label: {
-                                    Label {
-                                        Text(mode.rawValue)
-                                    } icon: {
-                                        if appearanceMode == mode.rawValue {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }
-                                }
-                            }
-                        } label: {
-                            Label("外観モード", systemImage: (AppearanceMode(rawValue: appearanceMode) ?? .auto).icon)
-                        }
-                    } label: {
-                        Label("設定", systemImage: "gearshape")
-                    }
+                    Button { importFromClipboard() } label: { Label("招待リンクで参加", systemImage: "link") }
+                    Button { showingNewEvent = true } label: { Label("新規作成", systemImage: "plus") }
+                    settingsMenu
                 }
             }
             .navigationDestination(for: UUID.self) { eventID in
                 if let binding = store.binding(for: eventID) {
                     ContentView(event: binding)
+                        .environmentObject(store)
                 }
             }
-            .alert("新しい飲み会", isPresented: $showingNewEvent) {
-                TextField("イベント名", text: $newEventTitle)
-                Button("作成") {
-                    let title = newEventTitle.trimmingCharacters(in: .whitespaces)
-                    if !title.isEmpty {
-                        let _ = store.addEvent(title: title)
-                    }
-                    newEventTitle = ""
-                }
-                Button("キャンセル", role: .cancel) { newEventTitle = "" }
-            } message: {
-                Text("イベント名を入力してください")
+        }
+        .alert("新しい飲み会", isPresented: $showingNewEvent) {
+            TextField("イベント名", text: $newEventTitle)
+            Button("作成") {
+                let title = newEventTitle.trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty { Task { let _ = try? await store.addEvent(title: title) } }
+                newEventTitle = ""
             }
-            .alert("イベント名を変更", isPresented: Binding(
-                get: { editingEventID != nil },
-                set: { if !$0 { editingEventID = nil } }
-            )) {
-                TextField("イベント名", text: $editingEventTitle)
-                Button("変更") {
-                    let title = editingEventTitle.trimmingCharacters(in: .whitespaces)
-                    if !title.isEmpty, let id = editingEventID {
-                        if let index = store.events.firstIndex(where: { $0.id == id }) {
-                            store.events[index].title = title
-                            store.save()
-                        }
-                    }
-                    editingEventID = nil
+            Button("キャンセル", role: .cancel) { newEventTitle = "" }
+        } message: {
+            Text("イベント名を入力してください")
+        }
+        .alert("イベント名を変更", isPresented: Binding(
+            get: { editingEventID != nil },
+            set: { if !$0 { editingEventID = nil } }
+        )) {
+            TextField("イベント名", text: $editingEventTitle)
+            Button("変更") {
+                let title = editingEventTitle.trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty, let id = editingEventID,
+                   let index = store.events.firstIndex(where: { $0.id == id }) {
+                    store.events[index].title = title
+                    store.events[index].updatedAt = Date()
+                    Task { try? await store.updateEvent(store.events[index]) }
                 }
-                Button("キャンセル", role: .cancel) { editingEventID = nil }
+                editingEventID = nil
             }
-            .sheet(isPresented: Binding(
-                get: { splitBillEventID != nil },
-                set: { if !$0 { splitBillEventID = nil } }
-            )) {
-                if let id = splitBillEventID,
-                   let event = store.events.first(where: { $0.id == id }) {
-                    SplitBillSheet(participantNames: event.participants.map { $0.name })
-                }
+            Button("キャンセル", role: .cancel) { editingEventID = nil }
+        }
+        .sheet(isPresented: Binding(
+            get: { splitBillEventID != nil },
+            set: { if !$0 { splitBillEventID = nil } }
+        )) {
+            if let id = splitBillEventID,
+               let event = store.events.first(where: { $0.id == id }) {
+                SplitBillSheet(participantNames: event.participants.map { $0.name })
             }
-            .alert("イベントの招待", isPresented: Binding(
-                get: { pendingImport != nil },
-                set: { if !$0 { pendingImport = nil } }
-            )) {
-                Button("参加する") {
-                    if let data = pendingImport {
-                        store.importEvent(from: data)
-                    }
-                    pendingImport = nil
-                }
-                Button("キャンセル", role: .cancel) { pendingImport = nil }
-            } message: {
-                if let data = pendingImport {
-                    Text("「\(data.t)」（\(data.d.count)つの候補日）\nに参加しますか？")
-                }
-            }
-            .alert("招待リンクが見つかりません", isPresented: $showingClipboardError) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("クリップボードに有効な招待リンクがありません。\n招待リンクをコピーしてから再度お試しください。")
+        }
+        .alert("招待リンクが見つかりません", isPresented: $showingClipboardError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("クリップボードに有効な招待リンクがありません。\n招待リンクをコピーしてから再度お試しください。")
+        }
+        .sheet(isPresented: Binding(
+            get: { joinDocID != nil || isLoadingJoin },
+            set: { if !$0 { joinDocID = nil; joinPreviewEvent = nil; isLoadingJoin = false } }
+        )) {
+            JoinEventSheet(store: store, joinDocID: $joinDocID, joinPreviewEvent: $joinPreviewEvent, isLoading: $isLoadingJoin)
+        }
+        .onChange(of: pendingJoinDocumentID) {
+            guard let docID = pendingJoinDocumentID else { return }
+            pendingJoinDocumentID = nil
+            if store.documentIDMap.values.contains(docID) { return }
+            joinDocID = docID
+            isLoadingJoin = true
+            Task {
+                joinPreviewEvent = try? await FirebaseService.shared.fetchEvent(documentID: docID)
+                isLoadingJoin = false
             }
         }
         #if os(macOS)
@@ -803,6 +886,90 @@ struct EventListView: View {
         .preferredColorScheme((AppearanceMode(rawValue: appearanceMode) ?? .auto).colorScheme)
     }
 }
+
+// MARK: - 参加確認シート
+
+struct JoinEventSheet: View {
+    @ObservedObject var store: EventStore
+    @Binding var joinDocID: String?
+    @Binding var joinPreviewEvent: Event?
+    @Binding var isLoading: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                if isLoading {
+                    Spacer()
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("イベント情報を取得中...")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                } else if let event = joinPreviewEvent, let docID = joinDocID {
+                    Spacer()
+                    Image(systemName: "envelope.open.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.teal)
+                    Text("イベントの招待")
+                        .font(.title2.bold())
+                    VStack(spacing: 8) {
+                        Text("「\(event.title)」")
+                            .font(.headline)
+                        HStack(spacing: 16) {
+                            Label("\(event.dateSlots.count)つの候補日", systemImage: "calendar")
+                            Label("\(event.participants.count)人参加中", systemImage: "person.2")
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Button {
+                        Task {
+                            let _ = try? await store.joinEvent(documentID: docID)
+                            joinDocID = nil
+                            joinPreviewEvent = nil
+                        }
+                    } label: {
+                        Label("参加する", systemImage: "checkmark.circle.fill")
+                            .font(.body.bold())
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.teal)
+                    Spacer()
+                } else {
+                    Spacer()
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.orange)
+                    Text("イベントが見つかりません")
+                        .font(.headline)
+                    Text("リンクが無効か、イベントが削除された可能性があります。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+            }
+            .padding(24)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") {
+                        joinDocID = nil
+                        joinPreviewEvent = nil
+                        isLoading = false
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+// MARK: - イベント行
 
 struct EventRow: View {
     let event: Event
@@ -869,6 +1036,7 @@ struct EventRow: View {
 
 struct ContentView: View {
     @Binding var event: Event
+    @EnvironmentObject var store: EventStore
     @State private var showingAddDate = false
     @State private var showingAddParticipant = false
     @State private var showingMidpoint = false
@@ -1401,27 +1569,26 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
 
-                        if !event.dateSlots.isEmpty {
-                            Button {
-                                if let url = EventShareCoder.encode(event: event) {
-                                    let shareText = "「\(event.title)」の日程調整に参加してね！\n\(url.absoluteString)"
-                                    #if os(iOS)
-                                    presentShareSheet(text: shareText)
-                                    #else
-                                    copyToClipboard(shareText)
-                                    #endif
-                                }
-                            } label: {
-                                Label("招待", systemImage: "link")
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(Color.teal.opacity(0.1))
-                                    .foregroundStyle(.teal)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                        Button {
+                            if let docID = store.documentID(for: event.id),
+                               let url = EventShareCoder.encodeShareLink(documentID: docID, title: event.title) {
+                                let shareText = "「\(event.title)」の日程調整に参加してね！\n\(url.absoluteString)"
+                                #if os(iOS)
+                                presentShareSheet(text: shareText)
+                                #else
+                                copyToClipboard(shareText)
+                                #endif
                             }
-                            .buttonStyle(.plain)
+                        } label: {
+                            Label("招待", systemImage: "link")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.teal.opacity(0.1))
+                                .foregroundStyle(.teal)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
+                        .buttonStyle(.plain)
                     }
                     .padding(.bottom, 8)
                 }
@@ -3000,5 +3167,5 @@ struct BannerAdView: UIViewRepresentable {
 // MARK: - プレビュー
 
 #Preview {
-    EventListView(store: EventStore(), pendingImport: .constant(nil))
+    EventListView(store: EventStore(), pendingImport: .constant(nil), pendingJoinDocumentID: .constant(nil))
 }
