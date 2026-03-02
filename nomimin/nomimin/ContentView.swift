@@ -7,7 +7,9 @@ import WebKit
 import AppKit
 #elseif os(iOS)
 import UIKit
+#if !targetEnvironment(simulator)
 import GoogleMobileAds
+#endif
 #endif
 
 // MARK: - プラットフォーム共通ユーティリティ
@@ -946,17 +948,25 @@ struct ContentView: View {
         .background(Color.gray.opacity(0.15))
     }
 
-    private var maxYesCount: Int {
+    /// 日程のスコアを計算（⚪︎=2点、△=1点、×=0点）
+    private func slotScore(_ slot: DateSlot) -> Int {
+        event.participants.reduce(0) { total, p in
+            switch p.availabilities[slot] ?? .no {
+            case .yes: return total + 2
+            case .maybe: return total + 1
+            case .no: return total + 0
+            }
+        }
+    }
+
+    private var maxSlotScore: Int {
         guard !event.participants.isEmpty else { return 0 }
-        return event.dateSlots.map { slot in
-            event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-        }.max() ?? 0
+        return event.dateSlots.map { slotScore($0) }.max() ?? 0
     }
 
     private func isTopSlot(_ slot: DateSlot) -> Bool {
-        guard !event.participants.isEmpty, maxYesCount > 0 else { return false }
-        let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-        return yesCount == maxYesCount
+        guard !event.participants.isEmpty, maxSlotScore > 0 else { return false }
+        return slotScore(slot) == maxSlotScore
     }
 
     private func headerBackground(for slot: DateSlot) -> Color {
@@ -2670,6 +2680,29 @@ struct SplitBillSheet: View {
 // MARK: - バナー広告
 
 #if os(iOS)
+#if targetEnvironment(simulator)
+// シミュレータではAdMob SDKが動作しないためモック広告を表示
+struct BannerAdView: View {
+    var body: some View {
+        ZStack {
+            Color(.systemGray6)
+            VStack(spacing: 2) {
+                Text("テスト広告")
+                    .font(.caption)
+                    .bold()
+                Text("実機では Google AdMob 広告が表示されます")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(height: 50)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+        )
+    }
+}
+#else
 struct BannerAdView: UIViewRepresentable {
     func makeUIView(context: Context) -> BannerView {
         let banner = BannerView(adSize: AdSizeBanner)
@@ -2684,6 +2717,7 @@ struct BannerAdView: UIViewRepresentable {
 
     func updateUIView(_ uiView: BannerView, context: Context) {}
 }
+#endif
 #endif
 
 // MARK: - プレビュー

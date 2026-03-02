@@ -7,14 +7,14 @@
 
 import SwiftUI
 
-#if os(iOS)
+#if os(iOS) && !targetEnvironment(simulator)
 import GoogleMobileAds
 #endif
 
 @main
 struct nomiminApp: App {
     init() {
-        #if os(iOS)
+        #if os(iOS) && !targetEnvironment(simulator)
         MobileAds.shared.start()
         #endif
     }
