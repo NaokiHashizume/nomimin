@@ -23,6 +23,26 @@ func copyToClipboard(_ text: String) {
     #endif
 }
 
+// MARK: - 共有ユーティリティ
+
+#if os(iOS)
+func presentShareSheet(text: String) {
+    guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+          let root = windowScene.windows.first?.rootViewController else { return }
+    var topVC = root
+    while let presented = topVC.presentedViewController {
+        topVC = presented
+    }
+    let activityVC = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+    if let popover = activityVC.popoverPresentationController {
+        popover.sourceView = topVC.view
+        popover.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+        popover.permittedArrowDirections = []
+    }
+    topVC.present(activityVC, animated: true)
+}
+#endif
+
 // MARK: - データモデル
 
 enum Availability: String, CaseIterable, Identifiable, Codable {
@@ -702,11 +722,10 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 確定情報バナー
+            // 確定情報カード
             if let info = event.confirmedInfo {
-                    confirmedBanner(info: info)
-                    Divider()
-                }
+                confirmedCard(info: info)
+            }
 
                 // メインコンテンツ
                 if event.dateSlots.isEmpty {
@@ -825,46 +844,88 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - 確定情報バナー
+    // MARK: - 確定情報カード
 
-    private func confirmedBanner(info: ConfirmedInfo) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.title3)
-                .foregroundStyle(.green)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("確定: \(info.shopName)")
-                    .font(.caption.bold())
-                Text("\(info.displayDate) \(info.displayTime)〜")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+    private func confirmedCard(info: ConfirmedInfo) -> some View {
+        VStack(spacing: 0) {
+            // ヘッダー
+            HStack {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(.green)
+                Text("飲み会が確定しました！")
+                    .font(.subheadline.bold())
+                Spacer()
+                Button(role: .destructive) {
+                    event.confirmedInfo = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
+            .padding(.horizontal)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
-            Spacer()
-
-            Button {
-                let summary = info.shareSummary(participants: event.participants.map { $0.name })
-                copyToClipboard(summary)
-            } label: {
-                Label("共有", systemImage: "square.and.arrow.up")
-                    .font(.caption)
+            // 詳細
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "building.2").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                    Text(info.shopName).font(.subheadline)
+                }
+                HStack(spacing: 8) {
+                    Image(systemName: "calendar").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                    Text(info.displayDate).font(.subheadline)
+                }
+                HStack(spacing: 8) {
+                    Image(systemName: "clock").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                    Text("\(info.displayTime)〜").font(.subheadline)
+                }
+                if !info.memo.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "note.text").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                        Text(info.memo).font(.subheadline)
+                    }
+                }
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "person.2").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                    Text(event.participants.map { $0.name }.joined(separator: "、"))
+                        .font(.subheadline)
+                }
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .padding(.horizontal)
+            .padding(.bottom, 10)
 
-            Button {
-                event.confirmedInfo = nil
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Divider().padding(.horizontal)
+
+            // アクションボタン
+            HStack(spacing: 12) {
+                Button {
+                    #if os(iOS)
+                    presentShareSheet(text: info.shareSummary(participants: event.participants.map { $0.name }))
+                    #else
+                    copyToClipboard(info.shareSummary(participants: event.participants.map { $0.name }))
+                    #endif
+                } label: {
+                    Label("共有", systemImage: "square.and.arrow.up")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    showingConfirm = true
+                } label: {
+                    Label("編集", systemImage: "pencil")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(Color.green.opacity(0.08))
+        .background(Color.green.opacity(0.06))
     }
 
     // MARK: - 空状態ビュー
@@ -901,30 +962,30 @@ struct ContentView: View {
     private var scheduleTable: some View {
         ScrollView(.vertical) {
             HStack(alignment: .top, spacing: 0) {
-                // 固定名前列
+                // 固定日程列（左）
                 VStack(spacing: 0) {
-                    nameHeaderCell
+                    dateColumnHeader
                     Divider()
-                    ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
-                        nameCell(index: index, participant: participant)
+                    ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+                        dateRowCell(slot: slot)
                         Divider()
                     }
                 }
                 #if os(iOS)
-                .frame(width: 100)
+                .frame(width: 110)
                 #else
                 .frame(width: 130)
                 #endif
 
                 Divider()
 
-                // スクロール可能な日程列
+                // スクロール可能な参加者列（右）
                 ScrollView(.horizontal, showsIndicators: false) {
                     VStack(spacing: 0) {
-                        dateHeaderRow
+                        participantHeaderRow
                         Divider()
-                        ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
-                            dateCellsRow(index: index, participant: participant)
+                        ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+                            availabilityRow(slot: slot)
                             Divider()
                         }
                     }
@@ -934,17 +995,12 @@ struct ContentView: View {
         }
     }
 
-    private var nameHeaderCell: some View {
-        VStack(spacing: 1) {
-            Text("名前")
-                .font(.caption.bold())
-            Text("最寄駅")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 50)
-        .background(Color.gray.opacity(0.15))
+    private var dateColumnHeader: some View {
+        Text("日程")
+            .font(.caption.bold())
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .background(Color.gray.opacity(0.15))
     }
 
     /// 日程のスコアを計算（⚪︎=2点、△=1点、×=0点）
@@ -982,35 +1038,49 @@ struct ContentView: View {
         return .clear
     }
 
-    private var dateHeaderRow: some View {
+    private var participantHeaderRow: some View {
         HStack(spacing: 0) {
-            ForEach(event.dateSlots.sorted(), id: \.self) { slot in
-                let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-                let maybeCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .maybe }.count
+            ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
+                let hasStation = !participant.nearestStation.trimmingCharacters(in: .whitespaces).isEmpty
 
                 ZStack(alignment: .topTrailing) {
-                    VStack(spacing: 2) {
-                        Text(slot.display)
-                            .font(.caption.bold())
-                        if !event.participants.isEmpty {
-                            HStack(spacing: 3) {
-                                Text("◯\(yesCount)")
-                                    .foregroundStyle(.green)
-                                Text("△\(maybeCount)")
-                                    .foregroundStyle(.orange)
+                    Button {
+                        editingStationIndex = index
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text(participant.name)
+                                .font(.caption.bold())
+                                .lineLimit(1)
+                            if hasStation {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "tram.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.blue)
+                                    Text(participant.nearestStation)
+                                        .font(.caption2)
+                                        .foregroundStyle(.blue)
+                                        .lineLimit(1)
+                                }
+                            } else {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "tram")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.secondary.opacity(0.5))
+                                    Text("最寄駅")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary.opacity(0.5))
+                                }
                             }
-                            .font(.system(size: 9))
                         }
+                        .frame(width: 80, height: 50)
+                        .background(Color.gray.opacity(0.15))
+                        .contentShape(Rectangle())
                     }
-                    .frame(width: 80, height: 50)
-                    .background(headerBackground(for: slot))
+                    .buttonStyle(.plain)
 
                     Button {
                         withAnimation {
-                            event.dateSlots.removeAll { $0 == slot }
-                            for i in event.participants.indices {
-                                event.participants[i].availabilities.removeValue(forKey: slot)
-                            }
+                            event.participants.removeAll { $0.id == participant.id }
                         }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -1024,48 +1094,35 @@ struct ContentView: View {
         }
     }
 
-    private func nameCell(index: Int, participant: Participant) -> some View {
-        let bgColor = index % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
-        let hasStation = !participant.nearestStation.trimmingCharacters(in: .whitespaces).isEmpty
+    private func dateRowCell(slot: DateSlot) -> some View {
+        let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
+        let maybeCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .maybe }.count
+        let slotIndex = event.dateSlots.sorted().firstIndex(of: slot) ?? 0
+        let stripe = slotIndex % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
 
         return HStack {
-            Button {
-                editingStationIndex = index
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(participant.name)
-                        .font(.caption)
-                        .lineLimit(1)
-                    if hasStation {
-                        HStack(spacing: 2) {
-                            Image(systemName: "tram.fill")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.blue)
-                            Text(participant.nearestStation)
-                                .font(.caption2)
-                                .foregroundStyle(.blue)
-                                .lineLimit(1)
-                        }
-                    } else {
-                        HStack(spacing: 2) {
-                            Image(systemName: "tram")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.secondary.opacity(0.5))
-                            Text("最寄駅を追加")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary.opacity(0.5))
-                        }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(slot.display)
+                    .font(.caption.bold())
+                if !event.participants.isEmpty {
+                    HStack(spacing: 3) {
+                        Text("◯\(yesCount)")
+                            .foregroundStyle(.green)
+                        Text("△\(maybeCount)")
+                            .foregroundStyle(.orange)
                     }
+                    .font(.system(size: 9))
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
 
             Spacer()
 
             Button {
                 withAnimation {
-                    event.participants.removeAll { $0.id == participant.id }
+                    event.dateSlots.removeAll { $0 == slot }
+                    for i in event.participants.indices {
+                        event.participants[i].availabilities.removeValue(forKey: slot)
+                    }
                 }
             } label: {
                 Image(systemName: "trash")
@@ -1076,14 +1133,15 @@ struct ContentView: View {
         }
         .frame(height: 50)
         .padding(.horizontal, 4)
-        .background(bgColor)
+        .background(headerBackground(for: slot).overlay(stripe))
     }
 
-    private func dateCellsRow(index: Int, participant: Participant) -> some View {
-        let stripe = index % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
+    private func availabilityRow(slot: DateSlot) -> some View {
+        let slotIndex = event.dateSlots.sorted().firstIndex(of: slot) ?? 0
+        let stripe = slotIndex % 2 == 0 ? Color.clear : Color.gray.opacity(0.05)
 
         return HStack(spacing: 0) {
-            ForEach(event.dateSlots.sorted(), id: \.self) { slot in
+            ForEach(Array(event.participants.enumerated()), id: \.element.id) { index, participant in
                 let avail = participant.availabilities[slot] ?? .no
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -2136,7 +2194,6 @@ struct ConfirmSheet: View {
     @State private var date = Date()
     @State private var time = Date()
     @State private var memo: String = ""
-    @State private var copied = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2232,12 +2289,12 @@ struct ConfirmSheet: View {
                                 .padding(.horizontal)
 
                             Button {
-                                let info = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo)
-                                copyToClipboard(info.shareSummary(participants: participantNames))
-                                copied = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+                                #if os(iOS)
+                                let text = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo).shareSummary(participants: participantNames)
+                                presentShareSheet(text: text)
+                                #endif
                             } label: {
-                                Label(copied ? "コピーしました!" : "テキストをコピー", systemImage: copied ? "checkmark" : "doc.on.doc")
+                                Label("共有", systemImage: "square.and.arrow.up")
                                     .font(.caption)
                             }
                             .buttonStyle(.bordered)
