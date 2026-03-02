@@ -7,7 +7,9 @@ import WebKit
 import AppKit
 #elseif os(iOS)
 import UIKit
+#if !targetEnvironment(simulator)
 import GoogleMobileAds
+#endif
 #endif
 
 // MARK: - プラットフォーム共通ユーティリティ
@@ -20,6 +22,20 @@ func copyToClipboard(_ text: String) {
     UIPasteboard.general.string = text
     #endif
 }
+
+// MARK: - 共有シート
+
+#if os(iOS)
+struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+#endif
 
 // MARK: - データモデル
 
@@ -430,7 +446,7 @@ class MidpointSearchService: ObservableObject {
 
     private let hotpepperAPIKey = "8fb7a3475e5af02f"
 
-    func searchShops(near coordinate: CLLocationCoordinate2D) async {
+    func searchShops(keyword stationName: String) async {
         isSearchingShops = true
         shopErrorMessage = nil
         shops = []
@@ -438,10 +454,9 @@ class MidpointSearchService: ObservableObject {
         var components = URLComponents(string: "https://webservice.recruit.co.jp/hotpepper/gourmet/v1/")!
         components.queryItems = [
             URLQueryItem(name: "key", value: hotpepperAPIKey),
-            URLQueryItem(name: "lat", value: String(coordinate.latitude)),
-            URLQueryItem(name: "lng", value: String(coordinate.longitude)),
-            URLQueryItem(name: "range", value: "4"),
-            URLQueryItem(name: "count", value: "10"),
+            URLQueryItem(name: "keyword", value: stationName),
+            URLQueryItem(name: "order", value: "4"),
+            URLQueryItem(name: "count", value: "20"),
             URLQueryItem(name: "format", value: "json"),
         ]
 
@@ -569,7 +584,7 @@ struct EventListView: View {
                     }
                 }
             }
-            .navigationTitle("のみにん")
+            .navigationTitle("のみみん")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.large)
             #endif
@@ -690,6 +705,7 @@ struct ContentView: View {
     @State private var showingMidpoint = false
     @State private var showingSplitBill = false
     @State private var showingConfirm = false
+    @State private var showingShareSheet = false
     @State private var editingStationIndex: Int?
 
     private var participantsWithStations: [String] {
@@ -701,11 +717,10 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 確定情報バナー
+            // 確定情報カード
             if let info = event.confirmedInfo {
-                    confirmedBanner(info: info)
-                    Divider()
-                }
+                confirmedCard(info: info)
+            }
 
                 // メインコンテンツ
                 if event.dateSlots.isEmpty {
@@ -824,46 +839,90 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - 確定情報バナー
+    // MARK: - 確定情報カード
 
-    private func confirmedBanner(info: ConfirmedInfo) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.title3)
-                .foregroundStyle(.green)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("確定: \(info.shopName)")
-                    .font(.caption.bold())
-                Text("\(info.displayDate) \(info.displayTime)〜")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+    private func confirmedCard(info: ConfirmedInfo) -> some View {
+        VStack(spacing: 0) {
+            // ヘッダー
+            HStack {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(.green)
+                Text("飲み会が確定しました！")
+                    .font(.subheadline.bold())
+                Spacer()
+                Button(role: .destructive) {
+                    event.confirmedInfo = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
+            .padding(.horizontal)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
-            Spacer()
-
-            Button {
-                let summary = info.shareSummary(participants: event.participants.map { $0.name })
-                copyToClipboard(summary)
-            } label: {
-                Label("共有", systemImage: "square.and.arrow.up")
-                    .font(.caption)
+            // 詳細
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "building.2").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                    Text(info.shopName).font(.subheadline)
+                }
+                HStack(spacing: 8) {
+                    Image(systemName: "calendar").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                    Text(info.displayDate).font(.subheadline)
+                }
+                HStack(spacing: 8) {
+                    Image(systemName: "clock").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                    Text("\(info.displayTime)〜").font(.subheadline)
+                }
+                if !info.memo.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "note.text").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                        Text(info.memo).font(.subheadline)
+                    }
+                }
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "person.2").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                    Text(event.participants.map { $0.name }.joined(separator: "、"))
+                        .font(.subheadline)
+                }
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .padding(.horizontal)
+            .padding(.bottom, 10)
 
-            Button {
-                event.confirmedInfo = nil
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Divider().padding(.horizontal)
+
+            // アクションボタン
+            HStack(spacing: 12) {
+                Button {
+                    showingShareSheet = true
+                } label: {
+                    Label("共有", systemImage: "square.and.arrow.up")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    showingConfirm = true
+                } label: {
+                    Label("編集", systemImage: "pencil")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            #if os(iOS)
+            .sheet(isPresented: $showingShareSheet) {
+                ActivityShareSheet(items: [info.shareSummary(participants: event.participants.map { $0.name })])
+                    .presentationDetents([.medium, .large])
+            }
+            #endif
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(Color.green.opacity(0.08))
+        .background(Color.green.opacity(0.06))
     }
 
     // MARK: - 空状態ビュー
@@ -946,17 +1005,25 @@ struct ContentView: View {
         .background(Color.gray.opacity(0.15))
     }
 
-    private var maxYesCount: Int {
+    /// 日程のスコアを計算（⚪︎=2点、△=1点、×=0点）
+    private func slotScore(_ slot: DateSlot) -> Int {
+        event.participants.reduce(0) { total, p in
+            switch p.availabilities[slot] ?? .no {
+            case .yes: return total + 2
+            case .maybe: return total + 1
+            case .no: return total + 0
+            }
+        }
+    }
+
+    private var maxSlotScore: Int {
         guard !event.participants.isEmpty else { return 0 }
-        return event.dateSlots.map { slot in
-            event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-        }.max() ?? 0
+        return event.dateSlots.map { slotScore($0) }.max() ?? 0
     }
 
     private func isTopSlot(_ slot: DateSlot) -> Bool {
-        guard !event.participants.isEmpty, maxYesCount > 0 else { return false }
-        let yesCount = event.participants.filter { ($0.availabilities[slot] ?? .no) == .yes }.count
-        return yesCount == maxYesCount
+        guard !event.participants.isEmpty, maxSlotScore > 0 else { return false }
+        return slotScore(slot) == maxSlotScore
     }
 
     private func headerBackground(for slot: DateSlot) -> Color {
@@ -1651,38 +1718,6 @@ struct EditStationSheet: View {
 
 // MARK: - アプリ内ブラウザ
 
-enum SearchSite: String, CaseIterable, Identifiable {
-    case hotpepper = "ホットペッパー"
-    case tabelog = "食べログ"
-    case gurunavi = "ぐるなび"
-    case google = "Google"
-
-    var id: String { rawValue }
-
-    func searchURL(for shopName: String) -> URL? {
-        let encoded = shopName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        switch self {
-        case .hotpepper:
-            return nil // 直接URLで開くため、searchURLは不要
-        case .tabelog:
-            return URL(string: "https://tabelog.com/rstLst/?vs=1&sw=\(encoded)")
-        case .gurunavi:
-            return URL(string: "https://r.gnavi.co.jp/eki/result?freeword=\(encoded)")
-        case .google:
-            return URL(string: "https://www.google.com/search?q=\(encoded)+予約")
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .hotpepper: return .pink
-        case .tabelog: return .orange
-        case .gurunavi: return .red
-        case .google: return .blue
-        }
-    }
-}
-
 #if os(iOS)
 struct WebView: UIViewRepresentable {
     let url: URL
@@ -1727,46 +1762,29 @@ struct WebView: NSViewRepresentable {
 }
 #endif
 
-struct InAppBrowserSheet: View {
+struct HotPepperBrowserSheet: View {
     let shopName: String
-    let initialURL: URL?
+    let shopURL: URL
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedSite: SearchSite = .hotpepper
     @State private var webView = WKWebView()
-
-    private func urlForSite(_ site: SearchSite) -> URL? {
-        if site == .hotpepper {
-            return initialURL
-        }
-        return site.searchURL(for: shopName)
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             // ナビバー
             HStack(spacing: 12) {
                 HStack(spacing: 4) {
-                    Button {
-                        webView.goBack()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.body)
+                    Button { webView.goBack() } label: {
+                        Image(systemName: "chevron.left").font(.body)
                     }
                     .buttonStyle(.plain)
 
-                    Button {
-                        webView.goForward()
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.body)
+                    Button { webView.goForward() } label: {
+                        Image(systemName: "chevron.right").font(.body)
                     }
                     .buttonStyle(.plain)
 
-                    Button {
-                        webView.reload()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.caption)
+                    Button { webView.reload() } label: {
+                        Image(systemName: "arrow.clockwise").font(.caption)
                     }
                     .buttonStyle(.plain)
                 }
@@ -1779,9 +1797,7 @@ struct InAppBrowserSheet: View {
 
                 Spacer()
 
-                Button {
-                    dismiss()
-                } label: {
+                Button { dismiss() } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
                         .foregroundStyle(.secondary)
@@ -1793,47 +1809,20 @@ struct InAppBrowserSheet: View {
 
             Divider()
 
-            // サイト切替タブ
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(SearchSite.allCases) { site in
-                        if site != .hotpepper || initialURL != nil {
-                            Button {
-                                if selectedSite != site {
-                                    selectedSite = site
-                                    if let url = urlForSite(site) {
-                                        webView.load(URLRequest(url: url))
-                                    }
-                                }
-                            } label: {
-                                Text(site.rawValue)
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .fill(selectedSite == site ? site.color.opacity(0.2) : Color.gray.opacity(0.1))
-                                    )
-                                    .foregroundStyle(selectedSite == site ? site.color : .secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                .padding(.horizontal)
+            // ホットペッパーラベル
+            HStack(spacing: 4) {
+                Image(systemName: "flame.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.pink)
+                Text("ホットペッパー")
+                    .font(.caption.bold())
+                    .foregroundStyle(.pink)
             }
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
 
             Divider()
 
-            // WebView
-            if let url = urlForSite(selectedSite) {
-                WebView(url: url, webView: webView)
-            } else {
-                Text("URLが見つかりませんでした")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            WebView(url: shopURL, webView: webView)
         }
         #if os(macOS)
         .frame(width: 520, height: 680)
@@ -1841,12 +1830,6 @@ struct InAppBrowserSheet: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         #endif
-        .onAppear {
-            // 初期URLがなければ食べログをデフォルトに
-            if initialURL == nil {
-                selectedSite = .tabelog
-            }
-        }
     }
 }
 
@@ -1859,9 +1842,7 @@ struct MidpointSheet: View {
     @Environment(\.openURL) private var openURL
     @StateObject private var service = MidpointSearchService()
     @State private var selectedStation: StationResult?
-    @State private var showingBrowser = false
-    @State private var browserShopName = ""
-    @State private var browserURL: URL?
+    @State private var browserShop: (name: String, url: URL)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1962,8 +1943,7 @@ struct MidpointSheet: View {
                                             selectedStation = station
                                         }
                                         Task {
-                                            let coord = MidpointSheet.extractCoordinate(from: station.mapItem)
-                                            await service.searchShops(near: coord)
+                                            await service.searchShops(keyword: station.name)
                                         }
                                     } label: {
                                         HStack(spacing: 12) {
@@ -2047,8 +2027,13 @@ struct MidpointSheet: View {
                 await service.search(stations: stations)
             }
         }
-        .sheet(isPresented: $showingBrowser) {
-            InAppBrowserSheet(shopName: browserShopName, initialURL: browserURL)
+        .sheet(isPresented: Binding(
+            get: { browserShop != nil },
+            set: { if !$0 { browserShop = nil } }
+        )) {
+            if let shop = browserShop {
+                HotPepperBrowserSheet(shopName: shop.name, shopURL: shop.url)
+            }
         }
     }
 
@@ -2157,9 +2142,7 @@ struct MidpointSheet: View {
 
                             if let couponURL = shop.couponURL {
                                 Button {
-                                    browserShopName = shop.name
-                                    browserURL = couponURL
-                                    showingBrowser = true
+                                    browserShop = (name: shop.name, url: couponURL)
                                 } label: {
                                     Label("クーポン", systemImage: "ticket")
                                         .font(.caption)
@@ -2169,17 +2152,17 @@ struct MidpointSheet: View {
                                 .tint(.orange)
                             }
 
-                            Button {
-                                browserShopName = shop.name
-                                browserURL = shop.hotpepperURL
-                                showingBrowser = true
-                            } label: {
-                                Label("予約", systemImage: "calendar.badge.clock")
-                                    .font(.caption)
+                            if let hpURL = shop.hotpepperURL {
+                                Button {
+                                    browserShop = (name: shop.name, url: hpURL)
+                                } label: {
+                                    Label("予約", systemImage: "calendar.badge.clock")
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .tint(.pink)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .tint(.green)
                         }
                     }
                     .padding(.horizontal, 12)
@@ -2211,7 +2194,8 @@ struct ConfirmSheet: View {
     @State private var date = Date()
     @State private var time = Date()
     @State private var memo: String = ""
-    @State private var copied = false
+    @State private var showingShare = false
+    @State private var shareContent = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2307,12 +2291,10 @@ struct ConfirmSheet: View {
                                 .padding(.horizontal)
 
                             Button {
-                                let info = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo)
-                                copyToClipboard(info.shareSummary(participants: participantNames))
-                                copied = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+                                shareContent = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo).shareSummary(participants: participantNames)
+                                showingShare = true
                             } label: {
-                                Label(copied ? "コピーしました!" : "テキストをコピー", systemImage: copied ? "checkmark" : "doc.on.doc")
+                                Label("共有", systemImage: "square.and.arrow.up")
                                     .font(.caption)
                             }
                             .buttonStyle(.bordered)
@@ -2357,6 +2339,12 @@ struct ConfirmSheet: View {
                 memo = existing.memo
             }
         }
+        #if os(iOS)
+        .sheet(isPresented: $showingShare) {
+            ActivityShareSheet(items: [shareContent])
+                .presentationDetents([.medium, .large])
+        }
+        #endif
     }
 }
 
@@ -2670,10 +2658,32 @@ struct SplitBillSheet: View {
 // MARK: - バナー広告
 
 #if os(iOS)
+#if targetEnvironment(simulator)
+// シミュレータではAdMob SDKが動作しないためモック広告を表示
+struct BannerAdView: View {
+    var body: some View {
+        ZStack {
+            Color(.systemGray6)
+            VStack(spacing: 2) {
+                Text("テスト広告")
+                    .font(.caption)
+                    .bold()
+                Text("実機では Google AdMob 広告が表示されます")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(height: 50)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+        )
+    }
+}
+#else
 struct BannerAdView: UIViewRepresentable {
     func makeUIView(context: Context) -> BannerView {
         let banner = BannerView(adSize: AdSizeBanner)
-        // テスト広告ユニットID（本番リリース前に差し替え）
         banner.adUnitID = "ca-app-pub-3940256099942544/2934735716"
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let root = windowScene.windows.first?.rootViewController {
@@ -2685,6 +2695,7 @@ struct BannerAdView: UIViewRepresentable {
 
     func updateUIView(_ uiView: BannerView, context: Context) {}
 }
+#endif
 #endif
 
 // MARK: - プレビュー
