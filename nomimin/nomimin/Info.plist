@@ -13,5 +13,7 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>最適な広告を表示するために、トラッキングの許可をお願いしています。</string>
 </dict>
 </plist>

@@ -205,7 +205,7 @@ class FirebaseService: ObservableObject {
     private func generateJoinCode() async throws -> String {
         let chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // 紛らわしい文字(0,O,1,I)を除外
         for _ in 0..<10 { // 最大10回リトライ
-            let code = String((0..<6).map { _ in chars.randomElement()! })
+            let code = String((0..<6).compactMap { _ in chars.randomElement() })
             // 重複チェック
             let snapshot = try await db.collection("events")
                 .whereField("joinCode", isEqualTo: code)
@@ -216,7 +216,7 @@ class FirebaseService: ObservableObject {
         }
         // フォールバック: 8文字にして衝突確率をさらに下げる
         let chars8 = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        return String((0..<8).map { _ in chars8.randomElement()! })
+        return String((0..<8).compactMap { _ in chars8.randomElement() })
     }
 
     // MARK: - イベント作成
@@ -329,6 +329,44 @@ class FirebaseService: ObservableObject {
         let firestoreEvent = try decoder.decode(FirestoreEvent.self, from: data)
         let eventUUID = UUID(uuidString: documentID) ?? UUID()
         return Event.fromFirestore(firestoreEvent, id: eventUUID)
+    }
+
+    // MARK: - アカウント削除
+
+    func deleteAccount() async throws {
+        guard let uid = currentUserUID else { throw FirebaseError.notAuthenticated }
+
+        // 1. ユーザーが参加している全イベントを取得
+        let snapshot = try await db.collection("events")
+            .whereField("memberUIDs", arrayContains: uid)
+            .getDocuments()
+
+        let batch = db.batch()
+
+        for doc in snapshot.documents {
+            let data = doc.data()
+            let ownerUID = data["ownerUID"] as? String
+
+            if ownerUID == uid {
+                // オーナーの場合はイベントごと削除
+                batch.deleteDocument(doc.reference)
+            } else {
+                // メンバーの場合は自分を除外
+                batch.updateData([
+                    "memberUIDs": FieldValue.arrayRemove([uid])
+                ], forDocument: doc.reference)
+            }
+        }
+
+        // 2. バッチ書き込み実行
+        try await batch.commit()
+
+        // 3. Firebase Auth アカウントを削除
+        try await Auth.auth().currentUser?.delete()
+
+        // 4. ローカル状態をリセット
+        currentUserUID = nil
+        isInitialized = false
     }
 
     // MARK: - 手動同期（フェッチ）

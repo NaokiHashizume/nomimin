@@ -10,6 +10,7 @@ import FirebaseCore
 
 #if os(iOS) && !targetEnvironment(simulator)
 import GoogleMobileAds
+import AppTrackingTransparency
 #endif
 
 @main
@@ -54,8 +55,20 @@ struct nomiminApp: App {
                     await store.migrateLocalEventsIfNeeded()
                     await store.sync()
                 } catch {
+                    #if DEBUG
                     print("Firebase init error: \(error)")
+                    #endif
                 }
+            }
+            .task {
+                // ATT ダイアログ表示（広告パーソナライズ許可）
+                #if os(iOS) && !targetEnvironment(simulator)
+                // 少し遅延させて起動後に表示
+                try? await Task.sleep(for: .seconds(1))
+                if ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
+                    await ATTrackingManager.requestTrackingAuthorization()
+                }
+                #endif
             }
             .onOpenURL { url in
                 // Share Extension: 予約確認データ

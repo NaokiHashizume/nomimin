@@ -237,7 +237,9 @@ class EventStore: ObservableObject {
     // MARK: - ローカルファイル（マイグレーション用）
 
     private static var fileURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nomimin_events.json")
+        }
         let appDir = appSupport.appendingPathComponent("nomimin", isDirectory: true)
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         return appDir.appendingPathComponent("events.json")
@@ -270,7 +272,9 @@ class EventStore: ObservableObject {
             joinCodeMap = newCodeMap
             events = newEvents
         } catch {
+            #if DEBUG
             print("Sync error: \(error)")
+            #endif
         }
     }
 
@@ -333,17 +337,32 @@ class EventStore: ObservableObject {
     // MARK: - Binding（Firestore自動保存）
 
     func binding(for eventID: UUID) -> Binding<Event>? {
-        guard let index = events.firstIndex(where: { $0.id == eventID }) else { return nil }
+        guard events.contains(where: { $0.id == eventID }) else { return nil }
         return Binding(
-            get: { self.events[index] },
+            get: {
+                guard let idx = self.events.firstIndex(where: { $0.id == eventID }) else {
+                    return Event(id: eventID, title: "")
+                }
+                return self.events[idx]
+            },
             set: { newValue in
-                self.events[index] = newValue
-                self.events[index].updatedAt = Date()
+                guard let idx = self.events.firstIndex(where: { $0.id == eventID }) else { return }
+                self.events[idx] = newValue
+                self.events[idx].updatedAt = Date()
                 Task {
-                    try? await self.updateEvent(self.events[index])
+                    try? await self.updateEvent(self.events[idx])
                 }
             }
         )
+    }
+
+    // MARK: - アカウント削除
+
+    func deleteAccount() async throws {
+        try await firebase.deleteAccount()
+        events.removeAll()
+        documentIDMap.removeAll()
+        joinCodeMap.removeAll()
     }
 
     // MARK: - ローカルデータ マイグレーション
@@ -366,9 +385,13 @@ class EventStore: ObservableObject {
             let backupURL = Self.fileURL.deletingLastPathComponent()
                 .appendingPathComponent("events_backup.json")
             try FileManager.default.moveItem(at: Self.fileURL, to: backupURL)
+            #if DEBUG
             print("Migrated \(localEvents.count) events to Firestore")
+            #endif
         } catch {
+            #if DEBUG
             print("Migration failed: \(error)")
+            #endif
         }
     }
 }
@@ -666,7 +689,9 @@ class MidpointSearchService: ObservableObject {
                 shopErrorMessage = "この付近にホットペッパー掲載店が見つかりませんでした。"
             }
         } catch {
+            #if DEBUG
             print("HotPepper API error: \(error)")
+            #endif
             shopErrorMessage = "飲食店の検索に失敗しました。\n\(error.localizedDescription)"
         }
 
@@ -724,6 +749,7 @@ struct EventListView: View {
     @Binding var pendingImport: SharedEventData?
     @Binding var pendingJoinDocumentID: String?
     @Binding var pendingConfirmedData: ParsedReservation?
+    @State private var navigationPath = NavigationPath()
     @State private var showingNewEvent = false
     @State private var newEventTitle = ""
     @State private var editingEventID: UUID?
@@ -738,6 +764,9 @@ struct EventListView: View {
     @State private var joinCodeInput = ""
     @State private var joinCodeError = false
     @State private var joinCodeAlreadyJoined = false
+    @State private var showingImportSheet = false
+    @State private var showingDeleteAccount = false
+    @State private var isDeletingAccount = false
 
     private func importFromClipboard() {
         #if os(iOS)
@@ -786,6 +815,14 @@ struct EventListView: View {
                 }
             } label: {
                 Label("外観モード", systemImage: (AppearanceMode(rawValue: appearanceMode) ?? .auto).icon)
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                showingDeleteAccount = true
+            } label: {
+                Label("アカウントとデータを削除", systemImage: "trash")
             }
         } label: {
             Label("設定", systemImage: "gearshape")
@@ -844,6 +881,13 @@ struct EventListView: View {
                                 splitBillEventID = event.id
                             }
                         }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                Task { try? await store.deleteEvent(id: event.id) }
+                            } label: {
+                                Label("削除", systemImage: "trash")
+                            }
+                        }
                         .contextMenu {
                             Button {
                                 editingEventTitle = event.title
@@ -868,6 +912,13 @@ struct EventListView: View {
                                 splitBillEventID = event.id
                             }
                         }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                Task { try? await store.deleteEvent(id: event.id) }
+                            } label: {
+                                Label("削除", systemImage: "trash")
+                            }
+                        }
                         .contextMenu {
                             Button {
                                 editingEventTitle = event.title
@@ -888,7 +939,7 @@ struct EventListView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             Group {
                 if store.events.isEmpty {
                     emptyStateView
@@ -920,7 +971,7 @@ struct EventListView: View {
             }
             .navigationDestination(for: UUID.self) { eventID in
                 if let binding = store.binding(for: eventID) {
-                    ContentView(event: binding)
+                    ContentView(event: binding, pendingReservation: $pendingConfirmedData)
                         .environmentObject(store)
                 }
             }
@@ -1022,7 +1073,156 @@ struct EventListView: View {
         } message: {
             Text("このイベントにはすでに参加しています。")
         }
+        .onAppear {
+            if pendingConfirmedData != nil {
+                showingImportSheet = true
+            }
+        }
+        .onChange(of: pendingConfirmedData != nil) {
+            if pendingConfirmedData != nil {
+                showingImportSheet = true
+            }
+        }
+        .sheet(isPresented: $showingImportSheet) {
+            if let parsed = pendingConfirmedData {
+                ImportReservationSheet(
+                    parsed: parsed,
+                    store: store,
+                    onCancel: {
+                        showingImportSheet = false
+                        pendingConfirmedData = nil
+                    },
+                    onSelectEvent: { eventID in
+                        // showingImportSheet を閉じるが pendingConfirmedData は保持
+                        // ContentView の onAppear で使うため
+                        showingImportSheet = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            navigationPath.append(eventID)
+                        }
+                    }
+                )
+            }
+        }
+        .alert("アカウントとデータを削除", isPresented: $showingDeleteAccount) {
+            Button("削除する", role: .destructive) {
+                isDeletingAccount = true
+                Task {
+                    try? await store.deleteAccount()
+                    isDeletingAccount = false
+                    // 再度匿名ログインして新しいアカウントを作成
+                    try? await FirebaseService.shared.signInAnonymously()
+                }
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("すべてのイベントデータとアカウント情報が完全に削除されます。この操作は取り消せません。")
+        }
+        .overlay {
+            if isDeletingAccount {
+                ZStack {
+                    Color.black.opacity(0.3).ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("削除中...")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+        }
         .preferredColorScheme((AppearanceMode(rawValue: appearanceMode) ?? .auto).colorScheme)
+    }
+}
+
+// MARK: - 予約情報取り込みシート
+
+struct ImportReservationSheet: View {
+    let parsed: ParsedReservation
+    @ObservedObject var store: EventStore
+    let onCancel: () -> Void
+    let onSelectEvent: (UUID) -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                // 予約情報プレビュー
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "building.2").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                            Text(parsed.shopName).font(.subheadline)
+                        }
+                        if !parsed.date.isEmpty {
+                            HStack(spacing: 6) {
+                                Image(systemName: "calendar").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                                Text(parsed.date).font(.subheadline)
+                            }
+                        }
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                            Text(parsed.time).font(.subheadline)
+                        }
+                        if let n = parsed.numberOfPeople {
+                            HStack(spacing: 6) {
+                                Image(systemName: "person.2").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                                Text("\(n)名").font(.subheadline)
+                            }
+                        }
+                        if let course = parsed.courseName {
+                            HStack(spacing: 6) {
+                                Image(systemName: "fork.knife").font(.caption).foregroundStyle(.blue).frame(width: 18)
+                                Text(course).font(.subheadline)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("取り込む予約情報")
+                }
+
+                // イベント選択リスト
+                Section {
+                    if store.events.isEmpty {
+                        Text("イベントがありません\n先にイベントを作成してください")
+                            .foregroundStyle(.secondary)
+                            .font(.subheadline)
+                    } else {
+                        ForEach(store.events) { event in
+                            Button {
+                                onSelectEvent(event.id)
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(event.title)
+                                            .font(.body.bold())
+                                            .foregroundStyle(.primary)
+                                        Text("\(event.participants.count)人")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("どのイベントに紐づけますか？")
+                }
+            }
+            .navigationTitle("🍻 予約情報の取り込み")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") {
+                        onCancel()
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1191,7 +1391,9 @@ struct EventRow: View {
 
 struct ContentView: View {
     @Binding var event: Event
+    @Binding var pendingReservation: ParsedReservation?
     @EnvironmentObject var store: EventStore
+    @Environment(\.dismiss) private var dismiss
     @State private var showingAddDate = false
     @State private var showingAddParticipant = false
     @State private var showingMidpoint = false
@@ -1200,6 +1402,8 @@ struct ContentView: View {
     @State private var editingStationIndex: Int?
     @State private var showingInviteCode = false
     @State private var inviteCodeCopied = false
+    @State private var showingDeleteConfirm = false
+    @State private var reservationInfoForConfirm: ConfirmedInfo?
 
     private var participantsWithStations: [String] {
         event.participants.compactMap { p in
@@ -1304,8 +1508,12 @@ struct ContentView: View {
                         Label("招待", systemImage: "person.badge.plus.fill")
                     }
 
-                    if !event.participants.isEmpty || participantsWithStations.count >= 2 {
-                        Divider()
+                    Divider()
+
+                    Button(role: .destructive) {
+                        showingDeleteConfirm = true
+                    } label: {
+                        Label("このイベントを削除", systemImage: "trash")
                     }
                 } label: {
                     Label("その他", systemImage: "ellipsis.circle")
@@ -1329,10 +1537,20 @@ struct ContentView: View {
         .sheet(isPresented: $showingConfirm) {
             ConfirmSheet(
                 participantNames: event.participants.map { $0.name },
-                existingInfo: event.confirmedInfo,
+                existingInfo: reservationInfoForConfirm ?? event.confirmedInfo,
                 topSlotDate: topSlotDate
             ) { info in
                 event.confirmedInfo = info
+                reservationInfoForConfirm = nil
+                pendingReservation = nil
+            }
+        }
+        .onAppear {
+            if let parsed = pendingReservation, let info = parsed.toConfirmedInfo() {
+                reservationInfoForConfirm = info
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    showingConfirm = true
+                }
             }
         }
         .sheet(isPresented: Binding(
@@ -1371,6 +1589,17 @@ struct ContentView: View {
         }
         .alert("コピーしました", isPresented: $inviteCodeCopied) {
             Button("OK", role: .cancel) {}
+        }
+        .alert("イベントを削除しますか？", isPresented: $showingDeleteConfirm) {
+            Button("削除", role: .destructive) {
+                Task {
+                    try? await store.deleteEvent(id: event.id)
+                    dismiss()
+                }
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("「\(event.title)」を削除します。この操作は取り消せません。")
         }
     }
 
@@ -3388,9 +3617,12 @@ struct BannerAdView: View {
 }
 #else
 struct BannerAdView: UIViewRepresentable {
+    // TODO: ⚠️ App Store 提出前に本番の Ad Unit ID に差し替えること
+    private static let adUnitID = "ca-app-pub-3940256099942544/2934735716" // テスト用ID
+
     func makeUIView(context: Context) -> BannerView {
         let banner = BannerView(adSize: AdSizeBanner)
-        banner.adUnitID = "ca-app-pub-3940256099942544/2934735716"
+        banner.adUnitID = Self.adUnitID
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let root = windowScene.windows.first?.rootViewController {
             banner.rootViewController = root
