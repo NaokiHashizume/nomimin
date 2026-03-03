@@ -848,9 +848,9 @@ struct EventListView: View {
             .buttonStyle(.borderedProminent)
 
             Button {
-                importFromClipboard()
+                showingJoinByCode = true
             } label: {
-                Label("招待リンクで参加", systemImage: "link")
+                Label("あいことばで参加", systemImage: "key")
                     .font(.body.bold())
             }
             .buttonStyle(.bordered)
