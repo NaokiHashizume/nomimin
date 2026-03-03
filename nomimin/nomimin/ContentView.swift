@@ -3617,8 +3617,7 @@ struct BannerAdView: View {
 }
 #else
 struct BannerAdView: UIViewRepresentable {
-    // TODO: ⚠️ App Store 提出前に本番の Ad Unit ID に差し替えること
-    private static let adUnitID = "ca-app-pub-3940256099942544/2934735716" // テスト用ID
+    private static let adUnitID = "ca-app-pub-1855090150674787/6175843026"
 
     func makeUIView(context: Context) -> BannerView {
         let banner = BannerView(adSize: AdSizeBanner)

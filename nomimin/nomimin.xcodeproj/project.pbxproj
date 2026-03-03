@@ -382,8 +382,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = nomimin/Info.plist;
-				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphoneos*]" = "ca-app-pub-3940256099942544~1458002511";
-				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphonesimulator*]" = "ca-app-pub-3940256099942544~1458002511";
+				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphoneos*]" = "ca-app-pub-1855090150674787~2298844638";
+				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphonesimulator*]" = "ca-app-pub-1855090150674787~2298844638";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -435,8 +435,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = nomimin/Info.plist;
-				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphoneos*]" = "ca-app-pub-3940256099942544~1458002511";
-				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphonesimulator*]" = "ca-app-pub-3940256099942544~1458002511";
+				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphoneos*]" = "ca-app-pub-1855090150674787~2298844638";
+				"INFOPLIST_KEY_GADApplicationIdentifier[sdk=iphonesimulator*]" = "ca-app-pub-1855090150674787~2298844638";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
