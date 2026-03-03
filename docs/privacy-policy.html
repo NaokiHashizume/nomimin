@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>プライバシーポリシー - のみみん</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+            line-height: 1.8;
+            color: #222;
+            background: #fff;
+            padding: 24px 16px 64px;
+            max-width: 720px;
+            margin: 0 auto;
+        }
+        h1 { font-size: 1.5rem; margin-bottom: 8px; }
+        .app-name { color: #e63836; }
+        .updated { font-size: 0.85rem; color: #888; margin-bottom: 32px; }
+        h2 {
+            font-size: 1.1rem;
+            margin-top: 32px;
+            margin-bottom: 8px;
+            padding-bottom: 4px;
+            border-bottom: 2px solid #e63836;
+        }
+        p, li { font-size: 0.95rem; margin-bottom: 8px; }
+        ul { padding-left: 1.5em; margin-bottom: 12px; }
+        table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.9rem; }
+        th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; }
+        th { background: #f8f8f8; white-space: nowrap; }
+        .contact { background: #f9f9f9; padding: 16px; border-radius: 8px; margin-top: 16px; }
+    </style>
+</head>
+<body>
+
+<h1><span class="app-name">のみみん</span> プライバシーポリシー</h1>
+<p class="updated">最終更新日: 2026年3月4日</p>
+
+<p>本プライバシーポリシーは、iOS アプリ「のみみん」（以下「本アプリ」）における個人情報の取り扱いについて説明するものです。本アプリをご利用いただく前に、本ポリシーの内容をご確認ください。</p>
+
+<h2>1. 運営者</h2>
+<p>個人開発者: Naoki Hashizume（以下「運営者」）</p>
+
+<h2>2. 収集する情報</h2>
+<p>本アプリでは、以下の情報を取得・利用します。</p>
+
+<table>
+    <tr><th>情報</th><th>目的</th><th>詳細</th></tr>
+    <tr>
+        <td>匿名ユーザーID</td>
+        <td>データ同期</td>
+        <td>Firebase Anonymous Authentication により自動生成される匿名IDです。氏名・メールアドレス等の個人を直接特定する情報は収集しません。</td>
+    </tr>
+    <tr>
+        <td>イベントデータ</td>
+        <td>アプリ機能の提供</td>
+        <td>ユーザーが入力したイベント名、候補日、参加者名、最寄り駅、確定情報（店名・住所・メモ等）を Firebase Firestore に保存します。</td>
+    </tr>
+    <tr>
+        <td>デバイス識別情報</td>
+        <td>広告配信</td>
+        <td>Google AdMob による広告配信のため、IDFA（広告識別子）等のデバイス情報が第三者（Google）に送信される場合があります。</td>
+    </tr>
+</table>
+
+<h2>3. 情報の利用目的</h2>
+<ul>
+    <li>飲み会の日程調整・確定機能の提供</li>
+    <li>複数端末・複数ユーザー間でのデータ同期</li>
+    <li>広告の表示（Google AdMob）</li>
+    <li>アプリの改善・不具合対応</li>
+</ul>
+
+<h2>4. 第三者サービスの利用</h2>
+<p>本アプリでは以下の第三者サービスを利用しています。各サービスにおけるデータの取り扱いについては、それぞれのプライバシーポリシーをご確認ください。</p>
+<ul>
+    <li><strong>Firebase（Google LLC）</strong>: 匿名認証、データベース<br>
+        <a href="https://firebase.google.com/support/privacy" target="_blank" rel="noopener">Firebase プライバシーポリシー</a></li>
+    <li><strong>Google AdMob（Google LLC）</strong>: 広告配信<br>
+        <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google プライバシーポリシー</a></li>
+    <li><strong>ホットペッパーグルメ API（リクルート）</strong>: 飲食店検索<br>
+        <a href="https://webservice.recruit.co.jp/terms/api-terms/" target="_blank" rel="noopener">リクルート API 利用規約</a></li>
+</ul>
+
+<h2>5. 広告とトラッキング</h2>
+<p>本アプリでは Google AdMob を利用して広告を表示しています。初回起動時に App Tracking Transparency（ATT）ダイアログを表示し、トラッキングの許可をお尋ねします。</p>
+<ul>
+    <li><strong>許可した場合</strong>: パーソナライズされた広告が表示されます。</li>
+    <li><strong>拒否した場合</strong>: パーソナライズされていない広告が表示されます。アプリの機能に影響はありません。</li>
+</ul>
+<p>トラッキングの設定は、端末の「設定」→「プライバシーとセキュリティ」→「トラッキング」からいつでも変更できます。</p>
+
+<h2>6. データの保存と管理</h2>
+<ul>
+    <li>イベントデータは Google Firebase Firestore（米国リージョン）に保存されます。</li>
+    <li>通信はすべて HTTPS で暗号化されています。</li>
+    <li>ユーザーが作成したイベントのデータは、同じイベントに参加している他のユーザーと共有されます。</li>
+</ul>
+
+<h2>7. データの削除</h2>
+<p>ユーザーはいつでも以下の方法でデータを削除できます。</p>
+<ul>
+    <li><strong>個別イベントの削除</strong>: イベント一覧で左スワイプ、またはイベント詳細画面の「…」メニューから削除</li>
+    <li><strong>アカウントと全データの削除</strong>: イベント一覧画面の「⚙️ 設定」→「アカウントとデータを削除」</li>
+</ul>
+<p>アカウント削除を実行すると、Firebase 上のすべてのイベントデータおよび匿名アカウントが完全に削除されます。この操作は取り消せません。</p>
+
+<h2>8. 児童のプライバシー</h2>
+<p>本アプリは 17 歳以上のユーザーを対象としています。13 歳未満の児童から意図的に個人情報を収集することはありません。</p>
+
+<h2>9. プライバシーポリシーの変更</h2>
+<p>本ポリシーは必要に応じて改定することがあります。重要な変更がある場合は、アプリ内またはこのページでお知らせします。</p>
+
+<h2>10. お問い合わせ</h2>
+<div class="contact">
+    <p>本ポリシーに関するご質問・お問い合わせは、以下までご連絡ください。</p>
+    <p><strong>メール</strong>: naoki.hashizume.dev@gmail.com</p>
+</div>
+
+</body>
+</html>
