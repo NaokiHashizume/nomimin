@@ -121,9 +121,32 @@ struct DateSlot: Hashable, Comparable, Codable {
 
 struct ConfirmedInfo: Codable {
     var shopName: String
+    var address: String
     var date: Date
     var time: Date
     var memo: String
+
+    // 後方互換: address がない古いデータもデコードできるようにする
+    enum CodingKeys: String, CodingKey {
+        case shopName, address, date, time, memo
+    }
+
+    init(shopName: String, address: String = "", date: Date, time: Date, memo: String) {
+        self.shopName = shopName
+        self.address = address
+        self.date = date
+        self.time = time
+        self.memo = memo
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        shopName = try container.decode(String.self, forKey: .shopName)
+        address = try container.decodeIfPresent(String.self, forKey: .address) ?? ""
+        date = try container.decode(Date.self, forKey: .date)
+        time = try container.decode(Date.self, forKey: .time)
+        memo = try container.decode(String.self, forKey: .memo)
+    }
 
     var displayDate: String {
         let f = DateFormatter()
@@ -145,6 +168,9 @@ struct ConfirmedInfo: Codable {
         lines.append("")
         lines.append("📅 日時: \(displayDate) \(displayTime)〜")
         lines.append("🏠 お店: \(shopName)")
+        if !address.isEmpty {
+            lines.append("📍 住所: \(address)")
+        }
         if !memo.isEmpty {
             lines.append("📝 備考: \(memo)")
         }
@@ -202,8 +228,11 @@ class EventStore: ObservableObject {
     private let firebase = FirebaseService.shared
     /// Event.id (UUID) → Firestore document ID
     private(set) var documentIDMap: [UUID: String] = [:]
+    /// Event.id (UUID) → あいことば
+    private(set) var joinCodeMap: [UUID: String] = [:]
     /// Firestore書き込み中のイベントID（リスナー更新を一時抑制）
     private var pendingWriteIDs: Set<UUID> = []
+    @Published var isSyncing = false
 
     // MARK: - ローカルファイル（マイグレーション用）
 
@@ -216,25 +245,32 @@ class EventStore: ObservableObject {
 
     init() {}
 
-    // MARK: - リアルタイムリスナー開始
+    // MARK: - 手動同期
 
-    func startListening() {
-        firebase.listenToUserEvents { [weak self] eventMap in
-            guard let self = self else { return }
+    func sync() async {
+        isSyncing = true
+        defer { isSyncing = false }
+        do {
+            let eventMap = try await firebase.fetchUserEvents()
             var newDocMap: [UUID: String] = [:]
+            var newCodeMap: [UUID: String] = [:]
             var newEvents: [Event] = []
-            for (docID, event) in eventMap {
-                newDocMap[event.id] = docID
-                // 書き込み中のイベントはローカル版を優先
-                if self.pendingWriteIDs.contains(event.id),
-                   let existing = self.events.first(where: { $0.id == event.id }) {
-                    newEvents.append(existing)
+            for (docID, fetched) in eventMap {
+                newDocMap[fetched.event.id] = docID
+                if let code = fetched.joinCode {
+                    newCodeMap[fetched.event.id] = code
                 } else {
-                    newEvents.append(event)
+                    if let code = try? await firebase.assignJoinCodeIfNeeded(documentID: docID) {
+                        newCodeMap[fetched.event.id] = code
+                    }
                 }
+                newEvents.append(fetched.event)
             }
-            self.documentIDMap = newDocMap
-            self.events = newEvents
+            documentIDMap = newDocMap
+            joinCodeMap = newCodeMap
+            events = newEvents
+        } catch {
+            print("Sync error: \(error)")
         }
     }
 
@@ -242,8 +278,9 @@ class EventStore: ObservableObject {
 
     func addEvent(title: String) async throws -> Event {
         let event = Event(title: title)
-        let docID = try await firebase.createEvent(event)
-        documentIDMap[event.id] = docID
+        let result = try await firebase.createEvent(event)
+        documentIDMap[event.id] = result.documentID
+        joinCodeMap[event.id] = result.joinCode
         events.append(event)
         return event
     }
@@ -271,6 +308,20 @@ class EventStore: ObservableObject {
             events.append(event)
         }
         return event
+    }
+
+    func joinByCode(_ code: String) async throws -> Event? {
+        guard let result = try await firebase.joinEventByCode(code) else { return nil }
+        documentIDMap[result.event.id] = result.documentID
+        joinCodeMap[result.event.id] = code.uppercased()
+        if !events.contains(where: { $0.id == result.event.id }) {
+            events.append(result.event)
+        }
+        return result.event
+    }
+
+    func joinCode(for eventID: UUID) -> String? {
+        joinCodeMap[eventID]
     }
 
     // MARK: - ドキュメントID取得
@@ -306,8 +357,9 @@ class EventStore: ObservableObject {
             let localEvents = try decoder.decode([Event].self, from: data)
 
             for event in localEvents {
-                let docID = try await firebase.createEvent(event)
-                documentIDMap[event.id] = docID
+                let result = try await firebase.createEvent(event)
+                documentIDMap[event.id] = result.documentID
+                joinCodeMap[event.id] = result.joinCode
             }
 
             // バックアップとして旧ファイルをリネーム
@@ -671,6 +723,7 @@ struct EventListView: View {
     @ObservedObject var store: EventStore
     @Binding var pendingImport: SharedEventData?
     @Binding var pendingJoinDocumentID: String?
+    @Binding var pendingConfirmedData: ParsedReservation?
     @State private var showingNewEvent = false
     @State private var newEventTitle = ""
     @State private var editingEventID: UUID?
@@ -681,6 +734,10 @@ struct EventListView: View {
     @State private var joinPreviewEvent: Event?
     @State private var joinDocID: String?
     @State private var isLoadingJoin = false
+    @State private var showingJoinByCode = false
+    @State private var joinCodeInput = ""
+    @State private var joinCodeError = false
+    @State private var joinCodeAlreadyJoined = false
 
     private func importFromClipboard() {
         #if os(iOS)
@@ -763,32 +820,68 @@ struct EventListView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var upcomingEvents: [Event] {
+        store.events.filter { event in
+            guard let info = event.confirmedInfo else { return true }
+            return info.date >= Calendar.current.startOfDay(for: Date())
+        }.sorted(by: { $0.updatedAt > $1.updatedAt })
+    }
+
+    private var pastEvents: [Event] {
+        store.events.filter { event in
+            guard let info = event.confirmedInfo else { return false }
+            return info.date < Calendar.current.startOfDay(for: Date())
+        }.sorted(by: { $0.updatedAt > $1.updatedAt })
+    }
+
     private var eventListContent: some View {
         List {
-            ForEach(store.events.sorted(by: { $0.updatedAt > $1.updatedAt })) { event in
-                NavigationLink(value: event.id) {
-                    EventRow(event: event) {
-                        splitBillEventID = event.id
-                    }
-                }
-                .contextMenu {
-                    Button {
-                        editingEventTitle = event.title
-                        editingEventID = event.id
-                    } label: {
-                        Label("名前を変更", systemImage: "pencil")
-                    }
-                    Button(role: .destructive) {
-                        Task { try? await store.deleteEvent(id: event.id) }
-                    } label: {
-                        Label("削除", systemImage: "trash")
+            if !upcomingEvents.isEmpty {
+                Section("開催予定") {
+                    ForEach(upcomingEvents) { event in
+                        NavigationLink(value: event.id) {
+                            EventRow(event: event) {
+                                splitBillEventID = event.id
+                            }
+                        }
+                        .contextMenu {
+                            Button {
+                                editingEventTitle = event.title
+                                editingEventID = event.id
+                            } label: {
+                                Label("名前を変更", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                Task { try? await store.deleteEvent(id: event.id) }
+                            } label: {
+                                Label("削除", systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }
-            .onDelete { offsets in
-                let sorted = store.events.sorted(by: { $0.updatedAt > $1.updatedAt })
-                for offset in offsets {
-                    Task { try? await store.deleteEvent(id: sorted[offset].id) }
+            if !pastEvents.isEmpty {
+                Section("開催済み") {
+                    ForEach(pastEvents) { event in
+                        NavigationLink(value: event.id) {
+                            EventRow(event: event) {
+                                splitBillEventID = event.id
+                            }
+                        }
+                        .contextMenu {
+                            Button {
+                                editingEventTitle = event.title
+                                editingEventID = event.id
+                            } label: {
+                                Label("名前を変更", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                Task { try? await store.deleteEvent(id: event.id) }
+                            } label: {
+                                Label("削除", systemImage: "trash")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -809,7 +902,18 @@ struct EventListView: View {
             #endif
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button { importFromClipboard() } label: { Label("招待リンクで参加", systemImage: "link") }
+                    Button {
+                        Task { await store.sync() }
+                    } label: {
+                        if store.isSyncing {
+                            ProgressView()
+                        } else {
+                            Label("同期", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(store.isSyncing)
+
+                    Button { showingJoinByCode = true } label: { Label("あいことばで参加", systemImage: "key") }
                     Button { showingNewEvent = true } label: { Label("新規作成", systemImage: "plus") }
                     settingsMenu
                 }
@@ -883,6 +987,41 @@ struct EventListView: View {
         #if os(macOS)
         .frame(minWidth: 520, minHeight: 400)
         #endif
+        .alert("あいことばで参加", isPresented: $showingJoinByCode) {
+            TextField("あいことばを入力", text: $joinCodeInput)
+                .textInputAutocapitalization(.characters)
+            Button("参加") {
+                let code = joinCodeInput.trimmingCharacters(in: .whitespaces).uppercased()
+                guard !code.isEmpty else { return }
+                // すでに参加済みかチェック
+                if store.joinCodeMap.values.contains(code) {
+                    joinCodeAlreadyJoined = true
+                    joinCodeInput = ""
+                    return
+                }
+                Task {
+                    if let _ = try? await store.joinByCode(code) {
+                        await store.sync()
+                    } else {
+                        joinCodeError = true
+                    }
+                }
+                joinCodeInput = ""
+            }
+            Button("キャンセル", role: .cancel) { joinCodeInput = "" }
+        } message: {
+            Text("招待されたあいことばを入力してください")
+        }
+        .alert("イベントが見つかりません", isPresented: $joinCodeError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("あいことばが正しくないか、イベントが削除された可能性があります。")
+        }
+        .alert("すでに参加済みです", isPresented: $joinCodeAlreadyJoined) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("このイベントにはすでに参加しています。")
+        }
         .preferredColorScheme((AppearanceMode(rawValue: appearanceMode) ?? .auto).colorScheme)
     }
 }
@@ -983,19 +1122,35 @@ struct EventRow: View {
 
                 if let info = event.confirmedInfo {
                     VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 8) {
-                            Label("\(event.participants.count)人", systemImage: "person.2")
-                            Label("\(info.displayDate) \(info.displayTime)〜", systemImage: "calendar")
+                        HStack(spacing: 6) {
+                            HStack(spacing: 2) {
+                                Image(systemName: "person.2")
+                                Text("\(event.participants.count)人")
+                            }
+                            HStack(spacing: 2) {
+                                Image(systemName: "calendar")
+                                Text("\(info.displayDate) \(info.displayTime)〜")
+                            }
                         }
-                        Label(info.shopName, systemImage: "mappin.circle")
+                        HStack(spacing: 2) {
+                            Image(systemName: "mappin.circle")
+                            Text(info.shopName + (info.address.isEmpty ? "" : "  \(info.address)"))
+                                .lineLimit(1)
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 } else {
-                    HStack(spacing: 8) {
-                        Label("\(event.participants.count)人", systemImage: "person.2")
+                    HStack(spacing: 6) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "person.2")
+                            Text("\(event.participants.count)人")
+                        }
                         if let range = event.dateRange {
-                            Label(range, systemImage: "calendar")
+                            HStack(spacing: 2) {
+                                Image(systemName: "calendar")
+                                Text(range)
+                            }
                         }
                     }
                     .font(.caption)
@@ -1009,7 +1164,7 @@ struct EventRow: View {
                 Button {
                     action()
                 } label: {
-                    Label("割勘", systemImage: "yensign.circle")
+                    Text("割勘")
                         .font(.caption2.bold())
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
@@ -1043,6 +1198,8 @@ struct ContentView: View {
     @State private var showingSplitBill = false
     @State private var showingConfirm = false
     @State private var editingStationIndex: Int?
+    @State private var showingInviteCode = false
+    @State private var inviteCodeCopied = false
 
     private var participantsWithStations: [String] {
         event.participants.compactMap { p in
@@ -1095,6 +1252,17 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
+                    Task { await store.sync() }
+                } label: {
+                    if store.isSyncing {
+                        ProgressView()
+                    } else {
+                        Label("同期", systemImage: "arrow.clockwise")
+                    }
+                }
+                .disabled(store.isSyncing)
+
+                Button {
                     showingAddDate = true
                 } label: {
                     Label("日程追加", systemImage: "calendar.badge.plus")
@@ -1128,6 +1296,12 @@ struct ContentView: View {
                         } label: {
                             Label("中間地点を探す", systemImage: "mappin.and.ellipse")
                         }
+                    }
+
+                    Button {
+                        showingInviteCode = true
+                    } label: {
+                        Label("招待", systemImage: "person.badge.plus.fill")
                     }
 
                     if !event.participants.isEmpty || participantsWithStations.count >= 2 {
@@ -1169,10 +1343,34 @@ struct ContentView: View {
                 EditStationSheet(
                     name: event.participants[index].name,
                     station: event.participants[index].nearestStation
-                ) { newStation in
+                ) { newName, newStation in
+                    event.participants[index].name = newName
                     event.participants[index].nearestStation = newStation
                 }
             }
+        }
+        .alert("招待あいことば", isPresented: $showingInviteCode) {
+            if let code = store.joinCode(for: event.id) {
+                Button("あいことばをコピー") {
+                    copyToClipboard(code)
+                    inviteCodeCopied = true
+                }
+                Button("メッセージごとコピー") {
+                    let text = "「\(event.title)」の日程調整に参加してね！\nあいことば: \(code)"
+                    copyToClipboard(text)
+                    inviteCodeCopied = true
+                }
+            }
+            Button("閉じる", role: .cancel) {}
+        } message: {
+            if let code = store.joinCode(for: event.id) {
+                Text("「\(event.title)」の日程調整に参加してね！\nあいことば: \(code)")
+            } else {
+                Text("あいことばが見つかりません。同期してからお試しください。")
+            }
+        }
+        .alert("コピーしました", isPresented: $inviteCodeCopied) {
+            Button("OK", role: .cancel) {}
         }
     }
 
@@ -1204,6 +1402,21 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "building.2").font(.caption).foregroundStyle(.blue).frame(width: 18)
                     Text(info.shopName).font(.subheadline)
+                }
+                if !info.address.isEmpty {
+                    Button {
+                        openInMaps(address: info.address)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "mappin.and.ellipse").font(.caption).foregroundStyle(.orange).frame(width: 18)
+                            Text(info.address)
+                                .font(.subheadline)
+                                .foregroundStyle(.blue)
+                                .underline()
+                                .multilineTextAlignment(.leading)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
                 HStack(spacing: 8) {
                     Image(systemName: "calendar").font(.caption).foregroundStyle(.blue).frame(width: 18)
@@ -1258,6 +1471,14 @@ struct ContentView: View {
             .padding(.vertical, 8)
         }
         .background(Color.green.opacity(0.06))
+    }
+
+    private func openInMaps(address: String) {
+        #if os(iOS)
+        guard let encoded = address.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "http://maps.apple.com/?q=\(encoded)") else { return }
+        UIApplication.shared.open(url)
+        #endif
     }
 
     // MARK: - 空状態ビュー
@@ -1570,17 +1791,9 @@ struct ContentView: View {
                         .buttonStyle(.plain)
 
                         Button {
-                            if let docID = store.documentID(for: event.id),
-                               let url = EventShareCoder.encodeShareLink(documentID: docID, title: event.title) {
-                                let shareText = "「\(event.title)」の日程調整に参加してね！\n\(url.absoluteString)"
-                                #if os(iOS)
-                                presentShareSheet(text: shareText)
-                                #else
-                                copyToClipboard(shareText)
-                                #endif
-                            }
+                            showingInviteCode = true
                         } label: {
-                            Label("招待", systemImage: "link")
+                            Label("招待", systemImage: "person.badge.plus")
                                 .font(.caption.bold())
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
@@ -2042,30 +2255,42 @@ struct AddParticipantSheet: View {
 // MARK: - 最寄駅編集シート
 
 struct EditStationSheet: View {
-    let name: String
+    @State private var editName: String
     @State private var station: String
-    let onSave: (String) -> Void
+    let onSave: (String, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
-    init(name: String, station: String, onSave: @escaping (String) -> Void) {
-        self.name = name
+    init(name: String, station: String, onSave: @escaping (String, String) -> Void) {
+        self._editName = State(initialValue: name)
         self._station = State(initialValue: station)
         self.onSave = onSave
     }
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("\(name) の最寄駅")
+            Text("参加者の編集")
                 .font(.headline)
                 .padding(.top)
 
-            HStack {
-                Image(systemName: "tram.fill")
-                    .foregroundStyle(.blue)
-                TextField("例: 渋谷", text: $station)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 200)
+            VStack(spacing: 12) {
+                HStack {
+                    Image(systemName: "person.fill")
+                        .foregroundStyle(.blue)
+                        .frame(width: 20)
+                    TextField("名前", text: $editName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                }
+
+                HStack {
+                    Image(systemName: "tram.fill")
+                        .foregroundStyle(.blue)
+                        .frame(width: 20)
+                    TextField("最寄駅（例: 渋谷）", text: $station)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                }
             }
             .padding(.horizontal)
 
@@ -2078,7 +2303,9 @@ struct EditStationSheet: View {
                 Spacer()
 
                 Button("保存") {
-                    onSave(station.trimmingCharacters(in: .whitespaces))
+                    let trimmedName = editName.trimmingCharacters(in: .whitespaces)
+                    let trimmedStation = station.trimmingCharacters(in: .whitespaces)
+                    onSave(trimmedName.isEmpty ? editName : trimmedName, trimmedStation)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -2086,9 +2313,9 @@ struct EditStationSheet: View {
             .padding()
         }
         #if os(macOS)
-        .frame(width: 280, height: 160)
+        .frame(width: 320, height: 220)
         #else
-        .presentationDetents([.height(200)])
+        .presentationDetents([.height(260)])
         .presentationDragIndicator(.visible)
         #endif
     }
@@ -2603,6 +2830,7 @@ struct ConfirmSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var shopName: String = ""
+    @State private var address: String = ""
     @State private var date = Date()
     @State private var time = Date()
     @State private var memo: String = ""
@@ -2623,6 +2851,17 @@ struct ConfirmSheet: View {
                             .font(.subheadline.bold())
                             .foregroundStyle(.secondary)
                         TextField("例: 鳥貴族 渋谷店", text: $shopName)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 280)
+                    }
+                    .padding(.horizontal)
+
+                    // 住所
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("住所（任意）")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.secondary)
+                        TextField("例: 東京都渋谷区道玄坂1-2-3", text: $address)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 280)
                     }
@@ -2689,7 +2928,7 @@ struct ConfirmSheet: View {
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal)
 
-                            let previewInfo = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo)
+                            let previewInfo = ConfirmedInfo(shopName: shopName, address: address, date: date, time: time, memo: memo)
                             Text(previewInfo.shareSummary(participants: participantNames))
                                 .font(.caption)
                                 .padding(10)
@@ -2702,7 +2941,7 @@ struct ConfirmSheet: View {
 
                             Button {
                                 #if os(iOS)
-                                let text = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo).shareSummary(participants: participantNames)
+                                let text = ConfirmedInfo(shopName: shopName, address: address, date: date, time: time, memo: memo).shareSummary(participants: participantNames)
                                 presentShareSheet(text: text)
                                 #endif
                             } label: {
@@ -2726,7 +2965,7 @@ struct ConfirmSheet: View {
                 Spacer()
 
                 Button("確定して保存") {
-                    let info = ConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo)
+                    let info = ConfirmedInfo(shopName: shopName, address: address, date: date, time: time, memo: memo)
                     onConfirm(info)
                     dismiss()
                 }
@@ -2746,6 +2985,7 @@ struct ConfirmSheet: View {
         .onAppear {
             if let existing = existingInfo {
                 shopName = existing.shopName
+                address = existing.address
                 date = existing.date
                 time = existing.time
                 memo = existing.memo
@@ -3167,5 +3407,5 @@ struct BannerAdView: UIViewRepresentable {
 // MARK: - プレビュー
 
 #Preview {
-    EventListView(store: EventStore(), pendingImport: .constant(nil), pendingJoinDocumentID: .constant(nil))
+    EventListView(store: EventStore(), pendingImport: .constant(nil), pendingJoinDocumentID: .constant(nil), pendingConfirmedData: .constant(nil))
 }

@@ -18,6 +18,7 @@ struct nomiminApp: App {
     @StateObject private var firebaseService = FirebaseService.shared
     @State private var pendingImport: SharedEventData?
     @State private var pendingJoinDocumentID: String?
+    @State private var pendingConfirmedData: ParsedReservation?
 
     init() {
         FirebaseService.shared.configure()
@@ -34,7 +35,8 @@ struct nomiminApp: App {
                     EventListView(
                         store: store,
                         pendingImport: $pendingImport,
-                        pendingJoinDocumentID: $pendingJoinDocumentID
+                        pendingJoinDocumentID: $pendingJoinDocumentID,
+                        pendingConfirmedData: $pendingConfirmedData
                     )
                 } else {
                     VStack(spacing: 16) {
@@ -50,14 +52,18 @@ struct nomiminApp: App {
                 do {
                     try await firebaseService.signInAnonymously()
                     await store.migrateLocalEventsIfNeeded()
-                    store.startListening()
+                    await store.sync()
                 } catch {
                     print("Firebase init error: \(error)")
                 }
             }
             .onOpenURL { url in
-                // 新: Firestore docIDベース
-                if let documentID = EventShareCoder.decodeShareLink(url: url) {
+                // Share Extension: 予約確認データ
+                if let parsed = ParsedReservation.fromURL(url) {
+                    pendingConfirmedData = parsed
+                }
+                // Firestore docIDベース
+                else if let documentID = EventShareCoder.decodeShareLink(url: url) {
                     pendingJoinDocumentID = documentID
                 }
                 // 旧: URL埋め込みデータ（後方互換）

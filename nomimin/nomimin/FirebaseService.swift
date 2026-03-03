@@ -17,6 +17,7 @@ struct FirestoreEvent: Codable {
     var title: String
     var ownerUID: String
     var memberUIDs: [String]
+    var joinCode: String?
     var dateSlots: [String]  // ISO 8601
     var participants: [FirestoreParticipant]
     var confirmedInfo: FirestoreConfirmedInfo?
@@ -33,6 +34,7 @@ struct FirestoreParticipant: Codable {
 
 struct FirestoreConfirmedInfo: Codable {
     var shopName: String
+    var address: String?
     var date: Date
     var time: Date
     var memo: String
@@ -106,20 +108,21 @@ extension Participant {
 
 extension ConfirmedInfo {
     func toFirestore() -> FirestoreConfirmedInfo {
-        FirestoreConfirmedInfo(shopName: shopName, date: date, time: time, memo: memo)
+        FirestoreConfirmedInfo(shopName: shopName, address: address.isEmpty ? nil : address, date: date, time: time, memo: memo)
     }
 
     static func fromFirestore(_ fc: FirestoreConfirmedInfo) -> ConfirmedInfo {
-        ConfirmedInfo(shopName: fc.shopName, date: fc.date, time: fc.time, memo: fc.memo)
+        ConfirmedInfo(shopName: fc.shopName, address: fc.address ?? "", date: fc.date, time: fc.time, memo: fc.memo)
     }
 }
 
 extension Event {
-    func toFirestore(ownerUID: String, memberUIDs: [String]) -> FirestoreEvent {
+    func toFirestore(ownerUID: String, memberUIDs: [String], joinCode: String? = nil) -> FirestoreEvent {
         FirestoreEvent(
             title: title,
             ownerUID: ownerUID,
             memberUIDs: memberUIDs,
+            joinCode: joinCode,
             dateSlots: dateSlots.sorted().map { $0.isoString },
             participants: participants.map { $0.toFirestore() },
             confirmedInfo: confirmedInfo?.toFirestore(),
@@ -189,18 +192,46 @@ class FirebaseService: ObservableObject {
         isInitialized = true
     }
 
+    // MARK: - あいことば生成・付与
+
+    func assignJoinCodeIfNeeded(documentID: String) async throws -> String {
+        let code = try await generateJoinCode()
+        try await db.collection("events").document(documentID).updateData([
+            "joinCode": code
+        ])
+        return code
+    }
+
+    private func generateJoinCode() async throws -> String {
+        let chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // 紛らわしい文字(0,O,1,I)を除外
+        for _ in 0..<10 { // 最大10回リトライ
+            let code = String((0..<6).map { _ in chars.randomElement()! })
+            // 重複チェック
+            let snapshot = try await db.collection("events")
+                .whereField("joinCode", isEqualTo: code)
+                .getDocuments()
+            if snapshot.documents.isEmpty {
+                return code
+            }
+        }
+        // フォールバック: 8文字にして衝突確率をさらに下げる
+        let chars8 = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        return String((0..<8).map { _ in chars8.randomElement()! })
+    }
+
     // MARK: - イベント作成
 
-    func createEvent(_ event: Event) async throws -> String {
+    func createEvent(_ event: Event) async throws -> (documentID: String, joinCode: String) {
         guard let uid = currentUserUID else { throw FirebaseError.notAuthenticated }
 
+        let joinCode = try await generateJoinCode()
         let docRef = db.collection("events").document()
-        let firestoreEvent = event.toFirestore(ownerUID: uid, memberUIDs: [uid])
+        let firestoreEvent = event.toFirestore(ownerUID: uid, memberUIDs: [uid], joinCode: joinCode)
 
         let encoder = Firestore.Encoder()
         let data = try encoder.encode(firestoreEvent)
         try await docRef.setData(data)
-        return docRef.documentID
+        return (docRef.documentID, joinCode)
     }
 
     // MARK: - イベント更新
@@ -258,6 +289,36 @@ class FirebaseService: ObservableObject {
         return Event.fromFirestore(firestoreEvent, id: eventUUID)
     }
 
+    // MARK: - あいことばでイベント検索
+
+    func fetchEventByJoinCode(_ code: String) async throws -> (documentID: String, event: Event)? {
+        let snapshot = try await db.collection("events")
+            .whereField("joinCode", isEqualTo: code.uppercased())
+            .getDocuments()
+
+        guard let doc = snapshot.documents.first else { return nil }
+
+        let decoder = Firestore.Decoder()
+        let firestoreEvent = try decoder.decode(FirestoreEvent.self, from: doc.data())
+        let eventUUID = UUID(uuidString: doc.documentID) ?? UUID()
+        return (doc.documentID, Event.fromFirestore(firestoreEvent, id: eventUUID))
+    }
+
+    // MARK: - あいことばでイベント参加
+
+    func joinEventByCode(_ code: String) async throws -> (documentID: String, event: Event)? {
+        guard let uid = currentUserUID else { throw FirebaseError.notAuthenticated }
+
+        guard let result = try await fetchEventByJoinCode(code) else { return nil }
+
+        // memberUIDsに追加
+        try await db.collection("events").document(result.documentID).updateData([
+            "memberUIDs": FieldValue.arrayUnion([uid])
+        ])
+
+        return result
+    }
+
     // MARK: - イベント取得（プレビュー用）
 
     func fetchEvent(documentID: String) async throws -> Event? {
@@ -270,58 +331,30 @@ class FirebaseService: ObservableObject {
         return Event.fromFirestore(firestoreEvent, id: eventUUID)
     }
 
-    // MARK: - リアルタイムリスナー
+    // MARK: - 手動同期（フェッチ）
 
-    func listenToUserEvents(onChange: @escaping ([String: Event]) -> Void) {
-        guard let uid = currentUserUID else { return }
+    struct FetchedEvent {
+        let event: Event
+        let joinCode: String?
+    }
 
-        removeListener(for: "userEvents")
+    func fetchUserEvents() async throws -> [String: FetchedEvent] {
+        guard let uid = currentUserUID else { throw FirebaseError.notAuthenticated }
 
-        let listener = db.collection("events")
+        let snapshot = try await db.collection("events")
             .whereField("memberUIDs", arrayContains: uid)
-            .addSnapshotListener { snapshot, error in
-                guard let documents = snapshot?.documents else { return }
+            .getDocuments()
 
-                let decoder = Firestore.Decoder()
-                var events: [String: Event] = [:]
+        let decoder = Firestore.Decoder()
+        var events: [String: FetchedEvent] = [:]
 
-                for doc in documents {
-                    if let firestoreEvent = try? decoder.decode(FirestoreEvent.self, from: doc.data()) {
-                        let eventUUID = UUID(uuidString: doc.documentID) ?? UUID()
-                        events[doc.documentID] = Event.fromFirestore(firestoreEvent, id: eventUUID)
-                    }
-                }
-                onChange(events)
+        for doc in snapshot.documents {
+            if let firestoreEvent = try? decoder.decode(FirestoreEvent.self, from: doc.data()) {
+                let eventUUID = UUID(uuidString: doc.documentID) ?? UUID()
+                let event = Event.fromFirestore(firestoreEvent, id: eventUUID)
+                events[doc.documentID] = FetchedEvent(event: event, joinCode: firestoreEvent.joinCode)
             }
-        eventListeners["userEvents"] = listener
-    }
-
-    func listenToEvent(documentID: String, onChange: @escaping (Event?) -> Void) {
-        removeListener(for: documentID)
-
-        let listener = db.collection("events").document(documentID)
-            .addSnapshotListener { snapshot, error in
-                guard let snapshot = snapshot, snapshot.exists, let data = snapshot.data() else {
-                    onChange(nil)
-                    return
-                }
-
-                let decoder = Firestore.Decoder()
-                if let firestoreEvent = try? decoder.decode(FirestoreEvent.self, from: data) {
-                    let eventUUID = UUID(uuidString: documentID) ?? UUID()
-                    onChange(Event.fromFirestore(firestoreEvent, id: eventUUID))
-                }
-            }
-        eventListeners[documentID] = listener
-    }
-
-    func removeListener(for key: String) {
-        eventListeners[key]?.remove()
-        eventListeners.removeValue(forKey: key)
-    }
-
-    func removeAllListeners() {
-        eventListeners.values.forEach { $0.remove() }
-        eventListeners.removeAll()
+        }
+        return events
     }
 }
