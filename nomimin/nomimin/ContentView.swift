@@ -196,15 +196,17 @@ struct Event: Identifiable, Codable {
     var participants: [Participant]
     var dateSlots: [DateSlot]
     var confirmedInfo: ConfirmedInfo?
+    var splitBillInfo: SplitBillInfo?
     var createdAt: Date
     var updatedAt: Date
 
-    init(id: UUID = UUID(), title: String, participants: [Participant] = [], dateSlots: [DateSlot] = [], confirmedInfo: ConfirmedInfo? = nil) {
+    init(id: UUID = UUID(), title: String, participants: [Participant] = [], dateSlots: [DateSlot] = [], confirmedInfo: ConfirmedInfo? = nil, splitBillInfo: SplitBillInfo? = nil) {
         self.id = id
         self.title = title
         self.participants = participants
         self.dateSlots = dateSlots
         self.confirmedInfo = confirmedInfo
+        self.splitBillInfo = splitBillInfo
         self.createdAt = Date()
         self.updatedAt = Date()
     }
@@ -1010,7 +1012,17 @@ struct EventListView: View {
         )) {
             if let id = splitBillEventID,
                let event = store.events.first(where: { $0.id == id }) {
-                SplitBillSheet(participantNames: event.participants.map { $0.name })
+                SplitBillSheet(
+                    participantNames: event.participants.map { $0.name },
+                    existingSplitBillInfo: event.splitBillInfo,
+                    onSaveSplitBill: { info in
+                        if let idx = store.events.firstIndex(where: { $0.id == id }) {
+                            store.events[idx].splitBillInfo = info
+                            store.events[idx].updatedAt = Date()
+                            Task { try? await store.updateEvent(store.events[idx]) }
+                        }
+                    }
+                )
             }
         }
         .alert("招待リンクが見つかりません", isPresented: $showingClipboardError) {
@@ -1532,7 +1544,13 @@ struct ContentView: View {
             MidpointSheet(stations: participantsWithStations)
         }
         .sheet(isPresented: $showingSplitBill) {
-            SplitBillSheet(participantNames: event.participants.map { $0.name })
+            SplitBillSheet(
+                participantNames: event.participants.map { $0.name },
+                existingSplitBillInfo: event.splitBillInfo,
+                onSaveSplitBill: { info in
+                    event.splitBillInfo = info
+                }
+            )
         }
         .sheet(isPresented: $showingConfirm) {
             ConfirmSheet(
@@ -3233,30 +3251,141 @@ struct ConfirmSheet: View {
     }
 }
 
+// MARK: - 割り勘データモデル
+
+enum RoundingUnit: Int, CaseIterable, Identifiable, Codable {
+    case hundred = 100
+    case fiveHundred = 500
+    case thousand = 1000
+
+    var id: Int { rawValue }
+
+    var display: String {
+        switch self {
+        case .hundred: return "100円"
+        case .fiveHundred: return "500円"
+        case .thousand: return "1000円"
+        }
+    }
+}
+
+enum RoundingDirection: String, CaseIterable, Identifiable, Codable {
+    case up = "切り上げ"
+    case down = "切り捨て"
+
+    var id: String { rawValue }
+}
+
+enum ParticipantTier: String, CaseIterable, Identifiable, Codable {
+    case more = "多め"
+    case normal = "普通"
+    case less = "少なめ"
+
+    var id: String { rawValue }
+
+    var ratio: Double {
+        switch self {
+        case .more: return 1.5
+        case .normal: return 1.0
+        case .less: return 0.5
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .more: return .orange
+        case .normal: return .blue
+        case .less: return .green
+        }
+    }
+}
+
+struct PaymentRecord: Identifiable, Codable {
+    let id: UUID
+    var fromName: String
+    var toName: String
+    var amount: Int
+    var paidAmount: Int
+    var paidAt: Date?
+
+    init(id: UUID = UUID(), fromName: String, toName: String, amount: Int, paidAmount: Int = 0, paidAt: Date? = nil) {
+        self.id = id
+        self.fromName = fromName
+        self.toName = toName
+        self.amount = amount
+        self.paidAmount = paidAmount
+        self.paidAt = paidAt
+    }
+
+    var isSettled: Bool { paidAmount >= amount }
+    var remainingAmount: Int { max(0, amount - paidAmount) }
+}
+
+struct SplitBillInfo: Codable {
+    var totalAmount: Int
+    var payerName: String
+    var paymentRecords: [PaymentRecord]
+    var createdAt: Date
+
+    init(totalAmount: Int = 0, payerName: String = "", paymentRecords: [PaymentRecord] = [], createdAt: Date = Date()) {
+        self.totalAmount = totalAmount
+        self.payerName = payerName
+        self.paymentRecords = paymentRecords
+        self.createdAt = createdAt
+    }
+}
+
 // MARK: - 割り勘計算シート
 
 enum SplitMode: String, CaseIterable, Identifiable {
     case equal = "均等割り"
     case organizerPaysMore = "幹事多め"
+    case tiered = "傾斜配分"
 
     var id: String { rawValue }
 }
 
 struct SplitBillSheet: View {
     let participantNames: [String]
+    let existingSplitBillInfo: SplitBillInfo?
+    let onSaveSplitBill: ((SplitBillInfo) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @State private var totalAmountText = ""
     @State private var headCount: Int
     @State private var splitMode: SplitMode = .equal
     @State private var organizerIndex = 0
-    @State private var payerSelection = 0  // 0〜N-1: 参加者, N: その他
+    @State private var payerSelection = 0
     @State private var customPayerName = ""
 
-    init(participantNames: [String]) {
+    // 端数処理オプション
+    @State private var roundingUnit: RoundingUnit = .hundred
+    @State private var roundingDirection: RoundingDirection = .up
+
+    // 傾斜配分
+    @State private var participantTiers: [ParticipantTier] = []
+
+    // 個別金額調整
+    @State private var individualAdjustments: [Int?] = []
+    @State private var editingAdjustmentIndex: Int? = nil
+    @State private var editingAmountText = ""
+
+    // 精算管理
+    @State private var paymentRecords: [PaymentRecord] = []
+    @State private var showingSettlement = false
+
+    init(participantNames: [String],
+         existingSplitBillInfo: SplitBillInfo? = nil,
+         onSaveSplitBill: ((SplitBillInfo) -> Void)? = nil) {
         self.participantNames = participantNames
+        self.existingSplitBillInfo = existingSplitBillInfo
+        self.onSaveSplitBill = onSaveSplitBill
         _headCount = State(initialValue: participantNames.count)
+        _participantTiers = State(initialValue: Array(repeating: .normal, count: max(participantNames.count, 1)))
+        _individualAdjustments = State(initialValue: Array(repeating: nil, count: max(participantNames.count, 1)))
     }
+
+    // MARK: - 計算ロジック
 
     private var totalAmount: Int {
         Int(totalAmountText) ?? 0
@@ -3270,18 +3399,25 @@ struct SplitBillSheet: View {
         return custom.isEmpty ? "支払い者" : custom
     }
 
-    /// 均等割り: 100円単位で切り上げ
+    private func roundAmount(_ value: Double) -> Int {
+        let unit = Double(roundingUnit.rawValue)
+        switch roundingDirection {
+        case .up:   return Int(ceil(value / unit)) * roundingUnit.rawValue
+        case .down: return Int(floor(value / unit)) * roundingUnit.rawValue
+        }
+    }
+
     private var equalPerPerson: Int {
         guard headCount > 0, totalAmount > 0 else { return 0 }
         let raw = Double(totalAmount) / Double(headCount)
-        return Int(ceil(raw / 100.0)) * 100
+        return roundAmount(raw)
     }
 
-    /// 幹事多め: メンバーは1000円単位で切り捨て、幹事が残りを負担
     private var memberAmount: Int {
         guard headCount > 1, totalAmount > 0 else { return 0 }
         let raw = Double(totalAmount) / Double(headCount)
-        return Int(floor(raw / 1000.0)) * 1000
+        let unit = Double(roundingUnit.rawValue)
+        return Int(floor(raw / unit)) * roundingUnit.rawValue
     }
 
     private var organizerAmount: Int {
@@ -3289,25 +3425,114 @@ struct SplitBillSheet: View {
         return totalAmount - memberAmount * (headCount - 1)
     }
 
+    private func tieredAmounts() -> [Int] {
+        let names = displayNames
+        guard !names.isEmpty, totalAmount > 0 else { return Array(repeating: 0, count: names.count) }
+        ensureTiersArray(count: names.count)
+
+        let totalRatio = names.indices.reduce(0.0) { sum, i in
+            sum + (i < participantTiers.count ? participantTiers[i].ratio : 1.0)
+        }
+        guard totalRatio > 0 else { return Array(repeating: 0, count: names.count) }
+
+        var amounts = names.indices.map { i -> Int in
+            let myRatio = i < participantTiers.count ? participantTiers[i].ratio : 1.0
+            let raw = Double(totalAmount) * myRatio / totalRatio
+            return roundAmount(raw)
+        }
+
+        // 端数の差分を「多め」の人に加算
+        let sum = amounts.reduce(0, +)
+        let diff = totalAmount - sum
+        if diff != 0 {
+            if let moreIdx = amounts.indices.first(where: { $0 < participantTiers.count && participantTiers[$0] == .more }) {
+                amounts[moreIdx] += diff
+            } else {
+                amounts[0] += diff
+            }
+        }
+        return amounts
+    }
+
     private func amountFor(index: Int) -> Int {
-        if splitMode == .equal {
+        if index < individualAdjustments.count, let override = individualAdjustments[index] {
+            return override
+        }
+        switch splitMode {
+        case .equal:
             return equalPerPerson
-        } else {
+        case .organizerPaysMore:
             return (index == organizerIndex && index < participantNames.count) ? organizerAmount : memberAmount
+        case .tiered:
+            let amounts = tieredAmounts()
+            return index < amounts.count ? amounts[index] : 0
+        }
+    }
+
+    private var hasAnyAdjustment: Bool {
+        individualAdjustments.contains(where: { $0 != nil })
+    }
+
+    private var adjustedTotal: Int {
+        displayNames.indices.reduce(0) { sum, i in
+            let isPayer = payerSelection < participantNames.count && i == payerSelection
+            if isPayer { return sum }
+            return sum + amountFor(index: i)
+        }
+    }
+
+    private func ensureTiersArray(count: Int) {
+        if participantTiers.count < count {
+            participantTiers.append(contentsOf: Array(repeating: ParticipantTier.normal, count: count - participantTiers.count))
+        }
+    }
+
+    private func ensureAdjustmentsArray(count: Int) {
+        if individualAdjustments.count < count {
+            individualAdjustments.append(contentsOf: Array(repeating: nil as Int?, count: count - individualAdjustments.count))
+        }
+    }
+
+    private var displayNames: [String] {
+        if headCount <= participantNames.count {
+            let prefixCount = min(headCount, participantNames.count)
+            return Array(participantNames[0..<prefixCount])
+        } else {
+            var names = participantNames
+            for i in (participantNames.count + 1)...headCount {
+                names.append("参加者\(i)")
+            }
+            return names
         }
     }
 
     private var resultSummary: String {
         guard totalAmount > 0, headCount > 0 else { return "" }
-        var lines: [String] = ["【割り勘計算結果】", "合計: ¥\(totalAmount)", "人数: \(headCount)人", "支払い: \(payerName)", ""]
+        var lines: [String] = [
+            "【割り勘計算結果】",
+            "合計: ¥\(totalAmount)",
+            "人数: \(headCount)人",
+            "支払い: \(payerName)",
+            "モード: \(splitMode.rawValue)",
+            "端数処理: \(roundingUnit.display) \(roundingDirection.rawValue)",
+            ""
+        ]
 
-        if splitMode == .equal {
+        switch splitMode {
+        case .equal:
             lines.append("一人あたり: ¥\(equalPerPerson)")
-        } else {
+        case .organizerPaysMore:
             let orgName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
             lines.append("幹事(\(orgName)): ¥\(organizerAmount)")
             lines.append("その他: ¥\(memberAmount)")
+        case .tiered:
+            lines.append("【傾斜配分】")
+            for (i, name) in displayNames.enumerated() {
+                let tier = i < participantTiers.count ? participantTiers[i] : .normal
+                lines.append("  \(name)(\(tier.rawValue)): ¥\(amountFor(index: i))")
+            }
         }
+
         lines.append("")
         lines.append("▼ \(payerName)さんへの支払い")
         for (i, name) in displayNames.enumerated() {
@@ -3322,6 +3547,26 @@ struct SplitBillSheet: View {
         return lines.joined(separator: "\n")
     }
 
+    private func saveSplitBillAndRecords() {
+        var records: [PaymentRecord] = []
+        for (i, name) in displayNames.enumerated() {
+            let isPayer = payerSelection < participantNames.count && i == payerSelection
+            if isPayer { continue }
+            let amount = amountFor(index: i)
+            guard amount > 0 else { continue }
+            records.append(PaymentRecord(fromName: name, toName: payerName, amount: amount))
+        }
+        paymentRecords = records
+        let info = SplitBillInfo(
+            totalAmount: totalAmount,
+            payerName: payerName,
+            paymentRecords: records
+        )
+        onSaveSplitBill?(info)
+    }
+
+    // MARK: - ビュー
+
     var body: some View {
         VStack(spacing: 0) {
             Text("割り勘計算")
@@ -3332,261 +3577,597 @@ struct SplitBillSheet: View {
 
             ScrollView {
                 VStack(spacing: 16) {
-                    // 合計金額
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("合計金額")
-                            .font(.subheadline.bold())
-                            .foregroundStyle(.secondary)
-
-                        HStack {
-                            Text("¥")
-                                .font(.title2.bold())
-                            TextField("例: 30000", text: $totalAmountText)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(maxWidth: 200)
-                        }
-                    }
-                    .padding(.horizontal)
-
-                    // 参加人数
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("参加人数")
-                            .font(.subheadline.bold())
-                            .foregroundStyle(.secondary)
-
-                        HStack(spacing: 12) {
-                            Button {
-                                if headCount > 1 { headCount -= 1 }
-                            } label: {
-                                Image(systemName: "minus.circle.fill")
-                                    .font(.title3)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(headCount <= 1)
-
-                            Text("\(headCount) 人")
-                                .font(.body.monospacedDigit())
-                                .frame(width: 50)
-
-                            Button {
-                                if headCount < 50 { headCount += 1 }
-                            } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.title3)
-                                    .foregroundStyle(.blue)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(headCount >= 50)
-                        }
-                    }
-                    .padding(.horizontal)
-
-                    // 支払い者
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("支払い者")
-                            .font(.subheadline.bold())
-                            .foregroundStyle(.secondary)
-
-                        Picker("支払い者", selection: $payerSelection) {
-                            ForEach(Array(participantNames.enumerated()), id: \.offset) { i, name in
-                                Text(name).tag(i)
-                            }
-                            Text("その他").tag(participantNames.count)
-                        }
-                        .frame(maxWidth: 200)
-
-                        if payerSelection == participantNames.count {
-                            TextField("支払い者の名前", text: $customPayerName)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(maxWidth: 200)
-                        }
-                    }
-                    .padding(.horizontal)
-
-                    // モード切替
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("割り勘モード")
-                            .font(.subheadline.bold())
-                            .foregroundStyle(.secondary)
-
-                        Picker("モード", selection: $splitMode) {
-                            ForEach(SplitMode.allCases) { mode in
-                                Text(mode.rawValue).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(maxWidth: 280)
-                    }
-                    .padding(.horizontal)
-
-                    // 幹事選択（幹事多めモード時）
-                    if splitMode == .organizerPaysMore && !participantNames.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("幹事")
-                                .font(.subheadline.bold())
-                                .foregroundStyle(.secondary)
-
-                            Picker("幹事", selection: $organizerIndex) {
-                                ForEach(Array(participantNames.enumerated()), id: \.offset) { i, name in
-                                    Text(name).tag(i)
-                                }
-                            }
-                            .frame(maxWidth: 200)
-                        }
-                        .padding(.horizontal)
-                    }
-
+                    inputSection
                     Divider()
-
-                    // 計算結果
                     if totalAmount > 0 {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("計算結果")
-                                .font(.subheadline.bold())
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal)
-
-                            if splitMode == .equal {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "person.fill")
-                                        .foregroundStyle(.green)
-                                    Text("一人あたり")
-                                        .font(.body)
-                                    Spacer()
-                                    Text("¥\(equalPerPerson)")
-                                        .font(.title2.bold())
-                                        .foregroundStyle(.green)
-                                }
-                                .padding(.horizontal)
-                                .padding(.vertical, 8)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(Color.green.opacity(0.1))
-                                )
-                                .padding(.horizontal)
-                            } else {
-                                let orgName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
-                                VStack(spacing: 6) {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "star.fill")
-                                            .foregroundStyle(.orange)
-                                        Text("幹事(\(orgName))")
-                                            .font(.body)
-                                        Spacer()
-                                        Text("¥\(organizerAmount)")
-                                            .font(.title3.bold())
-                                            .foregroundStyle(.orange)
-                                    }
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "person.fill")
-                                            .foregroundStyle(.blue)
-                                        Text("その他メンバー")
-                                            .font(.body)
-                                        Spacer()
-                                        Text("¥\(memberAmount)")
-                                            .font(.title3.bold())
-                                            .foregroundStyle(.blue)
-                                    }
-                                }
-                                .padding(.horizontal)
-                                .padding(.vertical, 8)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(Color.orange.opacity(0.1))
-                                )
-                                .padding(.horizontal)
-                            }
-
-                            // 支払い者への送金一覧
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "creditcard.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(.purple)
-                                    Text("\(payerName)さんへの支払い")
-                                        .font(.caption.bold())
-                                }
-                                .padding(.horizontal, 12)
-
-                                ForEach(Array(displayNames.enumerated()), id: \.offset) { i, name in
-                                    let amount = amountFor(index: i)
-                                    let isPayer = payerSelection < participantNames.count && i == payerSelection
-                                    HStack {
-                                        Text(name)
-                                            .font(.caption)
-                                        if isPayer {
-                                            Spacer()
-                                            Text("支払い済み")
-                                                .font(.caption2)
-                                                .foregroundStyle(.green)
-                                        } else {
-                                            Image(systemName: "arrow.right")
-                                                .font(.system(size: 8))
-                                                .foregroundStyle(.secondary)
-                                            Text(payerName)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                            Spacer()
-                                            Text("¥\(amount)")
-                                                .font(.caption.bold())
-                                                .foregroundStyle(.purple)
-                                        }
-                                    }
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 4)
-                                    .background(isPayer ? Color.green.opacity(0.05) : Color.clear)
-                                }
-                            }
-                            .padding(.horizontal)
-                        }
+                        resultsSection
                     }
                 }
                 .padding(.vertical, 16)
             }
 
             Divider()
-
-            HStack {
-                Button("閉じる") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-
-                Spacer()
-
-                if totalAmount > 0 {
-                    Button {
-                        #if os(iOS)
-                        presentShareSheet(text: resultSummary)
-                        #else
-                        copyToClipboard(resultSummary)
-                        #endif
-                    } label: {
-                        Label("共有", systemImage: "square.and.arrow.up")
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-            .padding()
+            bottomBar
         }
         #if os(macOS)
-        .frame(width: 380, height: 580)
+        .frame(width: 420, height: 680)
         #else
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         #endif
+        .onChange(of: splitMode) {
+            individualAdjustments = Array(repeating: nil, count: displayNames.count)
+            editingAdjustmentIndex = nil
+        }
+        .onChange(of: roundingUnit) {
+            individualAdjustments = Array(repeating: nil, count: displayNames.count)
+            editingAdjustmentIndex = nil
+        }
+        .onChange(of: roundingDirection) {
+            individualAdjustments = Array(repeating: nil, count: displayNames.count)
+            editingAdjustmentIndex = nil
+        }
+        .onAppear {
+            if let existing = existingSplitBillInfo {
+                totalAmountText = existing.totalAmount > 0 ? "\(existing.totalAmount)" : ""
+                paymentRecords = existing.paymentRecords
+                if let idx = participantNames.firstIndex(of: existing.payerName) {
+                    payerSelection = idx
+                } else if !existing.payerName.isEmpty {
+                    payerSelection = participantNames.count
+                    customPayerName = existing.payerName
+                }
+            }
+        }
+        .sheet(isPresented: $showingSettlement) {
+            SettlementView(records: $paymentRecords) { updatedRecords in
+                paymentRecords = updatedRecords
+                if var info = existingSplitBillInfo {
+                    info.paymentRecords = updatedRecords
+                    onSaveSplitBill?(info)
+                } else if totalAmount > 0 {
+                    let info = SplitBillInfo(
+                        totalAmount: totalAmount,
+                        payerName: payerName,
+                        paymentRecords: updatedRecords
+                    )
+                    onSaveSplitBill?(info)
+                }
+            }
+        }
     }
 
-    private var displayNames: [String] {
-        if headCount <= participantNames.count {
-            let prefixCount = min(headCount, participantNames.count)
-            return Array(participantNames[0..<prefixCount])
-        } else {
-            var names = participantNames
-            for i in (participantNames.count + 1)...headCount {
-                names.append("参加者\(i)")
+    // MARK: - 入力セクション
+
+    private var inputSection: some View {
+        VStack(spacing: 16) {
+            // 合計金額
+            VStack(alignment: .leading, spacing: 6) {
+                Text("合計金額")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("¥")
+                        .font(.title2.bold())
+                    TextField("例: 30000", text: $totalAmountText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                        #if os(iOS)
+                        .keyboardType(.numberPad)
+                        #endif
+                }
             }
-            return names
+            .padding(.horizontal)
+
+            // 参加人数
+            VStack(alignment: .leading, spacing: 6) {
+                Text("参加人数")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Button {
+                        if headCount > 1 { headCount -= 1 }
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(headCount <= 1)
+
+                    Text("\(headCount) 人")
+                        .font(.body.monospacedDigit())
+                        .frame(width: 50)
+
+                    Button {
+                        if headCount < 50 { headCount += 1 }
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(headCount >= 50)
+                }
+            }
+            .padding(.horizontal)
+
+            // 支払い者
+            VStack(alignment: .leading, spacing: 6) {
+                Text("支払い者")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.secondary)
+                Picker("支払い者", selection: $payerSelection) {
+                    ForEach(Array(participantNames.enumerated()), id: \.offset) { i, name in
+                        Text(name).tag(i)
+                    }
+                    Text("その他").tag(participantNames.count)
+                }
+                .frame(maxWidth: 200)
+                if payerSelection == participantNames.count {
+                    TextField("支払い者の名前", text: $customPayerName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                }
+            }
+            .padding(.horizontal)
+
+            // モード切替
+            VStack(alignment: .leading, spacing: 6) {
+                Text("割り勘モード")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.secondary)
+                Picker("モード", selection: $splitMode) {
+                    ForEach(SplitMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            .padding(.horizontal)
+
+            // 端数処理オプション
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("丸め単位")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    Picker("丸め単位", selection: $roundingUnit) {
+                        ForEach(RoundingUnit.allCases) { unit in
+                            Text(unit.display).tag(unit)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text("丸め方向")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    Picker("丸め方向", selection: $roundingDirection) {
+                        ForEach(RoundingDirection.allCases) { dir in
+                            Text(dir.rawValue).tag(dir)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                .padding(.top, 4)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "number.circle")
+                        .font(.caption)
+                    Text("端数処理: \(roundingUnit.display) \(roundingDirection.rawValue)")
+                        .font(.caption)
+                }
+                .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal)
+
+            // 幹事選択（幹事多めモード時）
+            if splitMode == .organizerPaysMore && !participantNames.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("幹事")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.secondary)
+                    Picker("幹事", selection: $organizerIndex) {
+                        ForEach(Array(participantNames.enumerated()), id: \.offset) { i, name in
+                            Text(name).tag(i)
+                        }
+                    }
+                    .frame(maxWidth: 200)
+                }
+                .padding(.horizontal)
+            }
+
+            // 傾斜配分設定（tieredモード時）
+            if splitMode == .tiered {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("配分ランク")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.secondary)
+                    Text("多め(1.5倍) / 普通(1倍) / 少なめ(0.5倍)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+
+                    ForEach(Array(displayNames.enumerated()), id: \.offset) { i, name in
+                        HStack {
+                            Text(name)
+                                .font(.caption)
+                                .frame(width: 72, alignment: .leading)
+                                .lineLimit(1)
+                            Picker("ランク", selection: Binding(
+                                get: {
+                                    i < participantTiers.count ? participantTiers[i] : .normal
+                                },
+                                set: { newVal in
+                                    ensureTiersArray(count: displayNames.count)
+                                    if i < participantTiers.count {
+                                        participantTiers[i] = newVal
+                                    }
+                                }
+                            )) {
+                                ForEach(ParticipantTier.allCases) { tier in
+                                    Text(tier.rawValue).tag(tier)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                    }
+                }
+                .padding(.horizontal)
+            }
         }
+    }
+
+    // MARK: - 計算結果セクション
+
+    private var resultsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("計算結果")
+                .font(.subheadline.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+
+            // モード別サマリーカード
+            resultSummaryCard
+
+            // 支払い者への送金一覧（個別調整付き）
+            paymentListSection
+
+            // 合計不一致の警告
+            if hasAnyAdjustment {
+                let payerTotal = adjustedTotal
+                if payerTotal != totalAmount {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("調整後の合計 ¥\(payerTotal) は合計金額 ¥\(totalAmount) と異なります")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var resultSummaryCard: some View {
+        switch splitMode {
+        case .equal:
+            HStack(spacing: 8) {
+                Image(systemName: "person.fill")
+                    .foregroundStyle(.green)
+                Text("一人あたり")
+                    .font(.body)
+                Spacer()
+                Text("¥\(equalPerPerson)")
+                    .font(.title2.bold())
+                    .foregroundStyle(.green)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
+            .padding(.horizontal)
+
+        case .organizerPaysMore:
+            let orgName = organizerIndex < participantNames.count ? participantNames[organizerIndex] : "幹事"
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: "star.fill").foregroundStyle(.orange)
+                    Text("幹事(\(orgName))").font(.body)
+                    Spacer()
+                    Text("¥\(organizerAmount)").font(.title3.bold()).foregroundStyle(.orange)
+                }
+                HStack(spacing: 8) {
+                    Image(systemName: "person.fill").foregroundStyle(.blue)
+                    Text("その他メンバー").font(.body)
+                    Spacer()
+                    Text("¥\(memberAmount)").font(.title3.bold()).foregroundStyle(.blue)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
+            .padding(.horizontal)
+
+        case .tiered:
+            VStack(spacing: 4) {
+                ForEach(Array(displayNames.enumerated()), id: \.offset) { i, name in
+                    let tier = i < participantTiers.count ? participantTiers[i] : .normal
+                    HStack(spacing: 8) {
+                        Circle().fill(tier.color).frame(width: 8, height: 8)
+                        Text("\(name)(\(tier.rawValue))").font(.caption)
+                        Spacer()
+                        Text("¥\(amountFor(index: i))").font(.caption.bold()).foregroundStyle(tier.color)
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.purple.opacity(0.08)))
+            .padding(.horizontal)
+        }
+    }
+
+    private var paymentListSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "creditcard.fill")
+                    .font(.caption)
+                    .foregroundStyle(.purple)
+                Text("\(payerName)さんへの支払い")
+                    .font(.caption.bold())
+            }
+            .padding(.horizontal, 12)
+
+            ForEach(Array(displayNames.enumerated()), id: \.offset) { i, name in
+                let isPayer = payerSelection < participantNames.count && i == payerSelection
+                let amount = amountFor(index: i)
+                let hasOverride = i < individualAdjustments.count && individualAdjustments[i] != nil
+
+                HStack {
+                    Text(name)
+                        .font(.caption)
+
+                    if isPayer {
+                        Spacer()
+                        Text("支払い済み")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                    } else if editingAdjustmentIndex == i {
+                        Spacer()
+                        TextField("金額", text: $editingAmountText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                            #if os(iOS)
+                            .keyboardType(.numberPad)
+                            #endif
+                        Button("完了") {
+                            ensureAdjustmentsArray(count: displayNames.count)
+                            if let val = Int(editingAmountText), val > 0 {
+                                individualAdjustments[i] = val
+                            }
+                            editingAdjustmentIndex = nil
+                            editingAmountText = ""
+                        }
+                        .font(.caption2)
+                        .buttonStyle(.bordered)
+                    } else {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                        Text(payerName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("¥\(amount)")
+                            .font(.caption.bold())
+                            .foregroundStyle(hasOverride ? .red : .purple)
+                        Button {
+                            ensureAdjustmentsArray(count: displayNames.count)
+                            editingAmountText = "\(amount)"
+                            editingAdjustmentIndex = i
+                        } label: {
+                            Image(systemName: "pencil.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(isPayer ? Color.green.opacity(0.05) : (hasOverride ? Color.red.opacity(0.05) : Color.clear))
+            }
+
+            // 個別調整リセット
+            if hasAnyAdjustment {
+                Button {
+                    individualAdjustments = Array(repeating: nil, count: displayNames.count)
+                    editingAdjustmentIndex = nil
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.counterclockwise")
+                        Text("個別調整をリセット")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+            }
+        }
+        .padding(.horizontal)
+    }
+
+    // MARK: - ボトムバー
+
+    private var bottomBar: some View {
+        HStack {
+            Button("閉じる") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+
+            Spacer()
+
+            if !paymentRecords.isEmpty {
+                Button {
+                    showingSettlement = true
+                } label: {
+                    Label("精算状況", systemImage: "list.bullet.clipboard")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .tint(.green)
+            }
+
+            if totalAmount > 0 {
+                if onSaveSplitBill != nil {
+                    Button {
+                        saveSplitBillAndRecords()
+                    } label: {
+                        Label("保存", systemImage: "tray.and.arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                }
+
+                Button {
+                    #if os(iOS)
+                    presentShareSheet(text: resultSummary)
+                    #else
+                    copyToClipboard(resultSummary)
+                    #endif
+                } label: {
+                    Label("共有", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+    }
+}
+
+// MARK: - 精算管理ビュー
+
+struct SettlementView: View {
+    @Binding var records: [PaymentRecord]
+    let onUpdate: (([PaymentRecord]) -> Void)?
+    @Environment(\.dismiss) private var dismiss
+
+    private var unsettledRecords: [PaymentRecord] {
+        records.filter { !$0.isSettled }
+    }
+
+    private var settledRecords: [PaymentRecord] {
+        records.filter { $0.isSettled }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !unsettledRecords.isEmpty {
+                    Section("未精算") {
+                        ForEach(unsettledRecords) { record in
+                            if let idx = records.firstIndex(where: { $0.id == record.id }) {
+                                SettlementRow(record: $records[idx])
+                            }
+                        }
+                    }
+                }
+
+                if !settledRecords.isEmpty {
+                    Section("精算済み") {
+                        ForEach(settledRecords) { record in
+                            if let idx = records.firstIndex(where: { $0.id == record.id }) {
+                                SettlementRow(record: $records[idx])
+                            }
+                        }
+                    }
+                }
+
+                if !records.isEmpty {
+                    Section {
+                        HStack {
+                            Text("未精算合計")
+                                .font(.subheadline.bold())
+                            Spacer()
+                            Text("¥\(unsettledRecords.reduce(0) { $0 + $1.remainingAmount })")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+
+                if records.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.green)
+                        Text("精算記録がありません")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                }
+            }
+            .navigationTitle("精算管理")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完了") {
+                        onUpdate?(records)
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct SettlementRow: View {
+    @Binding var record: PaymentRecord
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(record.fromName)
+                    .font(.subheadline.bold())
+                Image(systemName: "arrow.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(record.toName)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Text("¥\(record.amount)")
+                    .font(.caption)
+
+                if record.paidAmount > 0 && record.paidAmount < record.amount {
+                    Text("(¥\(record.paidAmount) 支払い済み)")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
+
+                Spacer()
+
+                if record.isSettled {
+                    Label("精算済み", systemImage: "checkmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                } else {
+                    Button("精算する") {
+                        record.paidAmount = record.amount
+                        record.paidAt = Date()
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .tint(.green)
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 

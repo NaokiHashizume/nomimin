@@ -21,6 +21,7 @@ struct FirestoreEvent: Codable {
     var dateSlots: [String]  // ISO 8601
     var participants: [FirestoreParticipant]
     var confirmedInfo: FirestoreConfirmedInfo?
+    var splitBillInfo: FirestoreSplitBillInfo?
     var createdAt: Date
     var updatedAt: Date
 }
@@ -38,6 +39,22 @@ struct FirestoreConfirmedInfo: Codable {
     var date: Date
     var time: Date
     var memo: String
+}
+
+struct FirestorePaymentRecord: Codable {
+    var id: String
+    var fromName: String
+    var toName: String
+    var amount: Int
+    var paidAmount: Int
+    var paidAt: Date?
+}
+
+struct FirestoreSplitBillInfo: Codable {
+    var totalAmount: Int
+    var payerName: String
+    var paymentRecords: [FirestorePaymentRecord]
+    var createdAt: Date
 }
 
 // MARK: - 変換ヘルパー
@@ -116,6 +133,41 @@ extension ConfirmedInfo {
     }
 }
 
+extension PaymentRecord {
+    func toFirestore() -> FirestorePaymentRecord {
+        FirestorePaymentRecord(
+            id: id.uuidString, fromName: fromName, toName: toName,
+            amount: amount, paidAmount: paidAmount, paidAt: paidAt
+        )
+    }
+
+    static func fromFirestore(_ fp: FirestorePaymentRecord) -> PaymentRecord {
+        PaymentRecord(
+            id: UUID(uuidString: fp.id) ?? UUID(),
+            fromName: fp.fromName, toName: fp.toName,
+            amount: fp.amount, paidAmount: fp.paidAmount, paidAt: fp.paidAt
+        )
+    }
+}
+
+extension SplitBillInfo {
+    func toFirestore() -> FirestoreSplitBillInfo {
+        FirestoreSplitBillInfo(
+            totalAmount: totalAmount, payerName: payerName,
+            paymentRecords: paymentRecords.map { $0.toFirestore() },
+            createdAt: createdAt
+        )
+    }
+
+    static func fromFirestore(_ fs: FirestoreSplitBillInfo) -> SplitBillInfo {
+        SplitBillInfo(
+            totalAmount: fs.totalAmount, payerName: fs.payerName,
+            paymentRecords: fs.paymentRecords.map { PaymentRecord.fromFirestore($0) },
+            createdAt: fs.createdAt
+        )
+    }
+}
+
 extension Event {
     func toFirestore(ownerUID: String, memberUIDs: [String], joinCode: String? = nil) -> FirestoreEvent {
         FirestoreEvent(
@@ -126,6 +178,7 @@ extension Event {
             dateSlots: dateSlots.sorted().map { $0.isoString },
             participants: participants.map { $0.toFirestore() },
             confirmedInfo: confirmedInfo?.toFirestore(),
+            splitBillInfo: splitBillInfo?.toFirestore(),
             createdAt: createdAt,
             updatedAt: updatedAt
         )
@@ -137,7 +190,8 @@ extension Event {
             title: fe.title,
             participants: fe.participants.map { Participant.fromFirestore($0) },
             dateSlots: fe.dateSlots.compactMap { DateSlot.fromISO($0) },
-            confirmedInfo: fe.confirmedInfo.map { ConfirmedInfo.fromFirestore($0) }
+            confirmedInfo: fe.confirmedInfo.map { ConfirmedInfo.fromFirestore($0) },
+            splitBillInfo: fe.splitBillInfo.map { SplitBillInfo.fromFirestore($0) }
         )
         event.createdAt = fe.createdAt
         event.updatedAt = fe.updatedAt
@@ -253,6 +307,12 @@ class FirebaseService: ObservableObject {
             updateData["confirmedInfo"] = try encoder.encode(confirmed.toFirestore())
         } else {
             updateData["confirmedInfo"] = FieldValue.delete()
+        }
+
+        if let splitBill = event.splitBillInfo {
+            updateData["splitBillInfo"] = try encoder.encode(splitBill.toFirestore())
+        } else {
+            updateData["splitBillInfo"] = FieldValue.delete()
         }
 
         try await docRef.updateData(updateData)
