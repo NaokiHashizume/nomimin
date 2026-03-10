@@ -50,17 +50,20 @@ struct nomiminApp: App {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .task {
-                do {
-                    try await firebaseService.signInAnonymously()
-                    await store.migrateLocalEventsIfNeeded()
-                    await store.sync()
-                } catch {
-                    #if DEBUG
-                    print("Firebase init error: \(error)")
-                    #endif
+            .onAppear {
+                Task { @MainActor in
+                    do {
+                        try await firebaseService.signInAnonymously()
+                        await store.migrateLocalEventsIfNeeded()
+                        await store.sync()
+                    } catch {
+                        #if DEBUG
+                        print("Firebase init error: \(error)")
+                        #endif
+                    }
+                    print("Setting isReady = true")
+                    isReady = true
                 }
-                isReady = true
             }
             .task {
                 // ATT ダイアログ表示（広告パーソナライズ許可）
