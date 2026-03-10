@@ -52,7 +52,10 @@ struct RootView: View {
                 print("Firebase init error: \(error)")
                 #endif
             }
+            print("Task.isCancelled = \(Task.isCancelled)")
+            print("Setting isReady = true now")
             isReady = true
+            print("isReady after set = \(isReady)")
         }
         .task {
             // ATT ダイアログ表示（広告パーソナライズ許可）
