@@ -17,7 +17,6 @@ import AppTrackingTransparency
 
 struct RootView: View {
     @StateObject private var store = EventStore()
-    @StateObject private var firebaseService = FirebaseService.shared
     @State private var isReady = false
     @State private var pendingImport: SharedEventData?
     @State private var pendingJoinDocumentID: String?
@@ -42,18 +41,22 @@ struct RootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task {
-            do {
-                try await firebaseService.signInAnonymously()
-                await store.migrateLocalEventsIfNeeded()
-                await store.sync()
-                isReady = true
-            } catch {
-                #if DEBUG
-                print("Firebase init error: \(error)")
-                #endif
-                isReady = true
-                print("isReady set to true in catch")
+        .onAppear {
+            guard !isReady else { return }
+            Task {
+                do {
+                    try await FirebaseService.shared.signInAnonymously()
+                    await store.migrateLocalEventsIfNeeded()
+                    await store.sync()
+                } catch {
+                    #if DEBUG
+                    print("Firebase init error: \(error)")
+                    #endif
+                }
+                await MainActor.run {
+                    isReady = true
+                    print("isReady set to true")
+                }
             }
         }
         .task {
