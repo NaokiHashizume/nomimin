@@ -58,6 +58,8 @@ struct nomiminApp: App {
                     #if DEBUG
                     print("Firebase init error: \(error)")
                     #endif
+                    // 認証失敗でもスピナーを止めて画面を表示する
+                    firebaseService.isInitialized = true
                 }
             }
             .task {
