@@ -47,15 +47,14 @@ struct RootView: View {
                 try await firebaseService.signInAnonymously()
                 await store.migrateLocalEventsIfNeeded()
                 await store.sync()
+                isReady = true
             } catch {
                 #if DEBUG
                 print("Firebase init error: \(error)")
                 #endif
+                isReady = true
+                print("isReady set to true in catch")
             }
-            print("Task.isCancelled = \(Task.isCancelled)")
-            print("Setting isReady = true now")
-            isReady = true
-            print("isReady after set = \(isReady)")
         }
         .task {
             // ATT ダイアログ表示（広告パーソナライズ許可）
