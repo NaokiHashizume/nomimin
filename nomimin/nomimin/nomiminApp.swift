@@ -13,77 +13,13 @@ import GoogleMobileAds
 import AppTrackingTransparency
 #endif
 
-// MARK: - Root View（@State が確実に動作するよう View に分離）
-
-struct RootView: View {
+@main
+struct nomiminApp: App {
     @StateObject private var store = EventStore()
-    @State private var isReady = false
     @State private var pendingImport: SharedEventData?
     @State private var pendingJoinDocumentID: String?
     @State private var pendingConfirmedData: ParsedReservation?
 
-    var body: some View {
-        Group {
-            if isReady {
-                EventListView(
-                    store: store,
-                    pendingImport: $pendingImport,
-                    pendingJoinDocumentID: $pendingJoinDocumentID,
-                    pendingConfirmedData: $pendingConfirmedData
-                )
-            } else {
-                VStack(spacing: 16) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("初期化中...")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .onAppear {
-            guard !isReady else { return }
-            Task {
-                do {
-                    try await FirebaseService.shared.signInAnonymously()
-                    await store.migrateLocalEventsIfNeeded()
-                    await store.sync()
-                } catch {
-                    #if DEBUG
-                    print("Firebase init error: \(error)")
-                    #endif
-                }
-                await MainActor.run {
-                    isReady = true
-                    print("isReady set to true")
-                }
-            }
-        }
-        .task {
-            // ATT ダイアログ表示（広告パーソナライズ許可）
-            #if os(iOS) && !targetEnvironment(simulator)
-            try? await Task.sleep(for: .seconds(1))
-            if ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
-                await ATTrackingManager.requestTrackingAuthorization()
-            }
-            #endif
-        }
-        .onOpenURL { url in
-            if let parsed = ParsedReservation.fromURL(url) {
-                pendingConfirmedData = parsed
-            } else if let documentID = EventShareCoder.decodeShareLink(url: url) {
-                pendingJoinDocumentID = documentID
-            } else if let data = EventShareCoder.decode(url: url) {
-                pendingImport = data
-            }
-        }
-    }
-}
-
-// MARK: - App Entry Point
-
-@main
-struct nomiminApp: App {
     init() {
         FirebaseService.shared.configure()
 
@@ -94,7 +30,41 @@ struct nomiminApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            EventListView(
+                store: store,
+                pendingImport: $pendingImport,
+                pendingJoinDocumentID: $pendingJoinDocumentID,
+                pendingConfirmedData: $pendingConfirmedData
+            )
+            .task {
+                do {
+                    try await FirebaseService.shared.signInAnonymously()
+                    await store.migrateLocalEventsIfNeeded()
+                    await store.sync()
+                } catch {
+                    #if DEBUG
+                    print("Firebase init error: \(error)")
+                    #endif
+                }
+            }
+            .task {
+                // ATT ダイアログ表示（広告パーソナライズ許可）
+                #if os(iOS) && !targetEnvironment(simulator)
+                try? await Task.sleep(for: .seconds(1))
+                if ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
+                    await ATTrackingManager.requestTrackingAuthorization()
+                }
+                #endif
+            }
+            .onOpenURL { url in
+                if let parsed = ParsedReservation.fromURL(url) {
+                    pendingConfirmedData = parsed
+                } else if let documentID = EventShareCoder.decodeShareLink(url: url) {
+                    pendingJoinDocumentID = documentID
+                } else if let data = EventShareCoder.decode(url: url) {
+                    pendingImport = data
+                }
+            }
         }
     }
 }
