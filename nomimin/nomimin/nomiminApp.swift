@@ -17,6 +17,7 @@ import AppTrackingTransparency
 struct nomiminApp: App {
     @StateObject private var store = EventStore()
     @StateObject private var firebaseService = FirebaseService.shared
+    @State private var isReady = false
     @State private var pendingImport: SharedEventData?
     @State private var pendingJoinDocumentID: String?
     @State private var pendingConfirmedData: ParsedReservation?
@@ -32,7 +33,7 @@ struct nomiminApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if firebaseService.isInitialized {
+                if isReady {
                     EventListView(
                         store: store,
                         pendingImport: $pendingImport,
@@ -58,9 +59,8 @@ struct nomiminApp: App {
                     #if DEBUG
                     print("Firebase init error: \(error)")
                     #endif
-                    // 認証失敗でもスピナーを止めて画面を表示する
-                    firebaseService.isInitialized = true
                 }
+                isReady = true
             }
             .task {
                 // ATT ダイアログ表示（広告パーソナライズ許可）
