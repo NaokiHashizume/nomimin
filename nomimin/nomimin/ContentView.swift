@@ -2109,8 +2109,9 @@ struct AddDateSheet: View {
     @State private var addedCount = 0
     @State private var currentMonth = Date()
     @State private var pendingDates: Set<Date> = []
-    @State private var currentDragDates: Set<Date> = []
+    @State private var dragPath: [Date] = []
     @State private var preDragPendingDates: Set<Date> = []
+    @State private var isDragRemoving: Bool = false
 
     private var existingDateSet: Set<Date> {
         Set(dateSlots.map { Calendar.current.startOfDay(for: $0.date) })
@@ -2289,24 +2290,35 @@ struct AddDateSheet: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        if currentDragDates.isEmpty {
-                            preDragPendingDates = pendingDates
-                        }
                         if let date = dateForPoint(value.location, cellWidth: cellWidth, cellHeight: cellHeight, vSpacing: vSpacing, days: days) {
                             if !existingDateSet.contains(date) {
-                                currentDragDates.insert(date)
-                                pendingDates.insert(date)
+                                if dragPath.isEmpty {
+                                    preDragPendingDates = pendingDates
+                                    isDragRemoving = preDragPendingDates.contains(date)
+                                }
+                                if let last = dragPath.last, last == date {
+                                    // 同じセル、何もしない
+                                } else if let index = dragPath.firstIndex(of: date) {
+                                    // 戻った → パスを切り詰め
+                                    dragPath = Array(dragPath.prefix(index + 1))
+                                } else {
+                                    // 新しいセル
+                                    dragPath.append(date)
+                                }
+                                // dragPathに基づいてpendingDatesを再計算
+                                let dragSet = Set(dragPath)
+                                if isDragRemoving {
+                                    pendingDates = preDragPendingDates.subtracting(dragSet)
+                                } else {
+                                    pendingDates = preDragPendingDates.union(dragSet)
+                                }
                             }
                         }
                     }
                     .onEnded { _ in
-                        if currentDragDates.count == 1, let date = currentDragDates.first {
-                            if preDragPendingDates.contains(date) {
-                                pendingDates.remove(date)
-                            }
-                        }
-                        currentDragDates.removeAll()
+                        dragPath.removeAll()
                         preDragPendingDates.removeAll()
+                        isDragRemoving = false
                     }
             )
         }
@@ -4175,25 +4187,10 @@ struct SettlementRow: View {
 
 #if os(iOS)
 #if targetEnvironment(simulator)
-// シミュレータではAdMob SDKが動作しないためモック広告を表示
+// シミュレータではAdMob SDKが動作しないため非表示
 struct BannerAdView: View {
     var body: some View {
-        ZStack {
-            Color(.systemGray6)
-            VStack(spacing: 2) {
-                Text("テスト広告")
-                    .font(.caption)
-                    .bold()
-                Text("実機では Google AdMob 広告が表示されます")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .frame(height: 50)
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-        )
+        EmptyView()
     }
 }
 #else

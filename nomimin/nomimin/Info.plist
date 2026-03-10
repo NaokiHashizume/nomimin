@@ -17,5 +17,7 @@
 	</array>
 	<key>NSUserTrackingUsageDescription</key>
 	<string>最適な広告を表示するために、トラッキングの許可をお願いしています。</string>
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-1855090150674787~2298844638</string>
 </dict>
 </plist>
