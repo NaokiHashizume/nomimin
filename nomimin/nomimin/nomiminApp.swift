@@ -52,14 +52,8 @@ struct nomiminApp: App {
                 Task {
                     // アプリが完全にアクティブになってからATTダイアログを表示
                     try? await Task.sleep(for: .seconds(0.5))
-                    let status = ATTrackingManager.trackingAuthorizationStatus
-                    print("🔍 ATT status: \(status.rawValue) (0=notDetermined, 1=restricted, 2=denied, 3=authorized)")
-                    if status == .notDetermined {
-                        print("🔍 ATTダイアログを表示します")
-                        let result = await ATTrackingManager.requestTrackingAuthorization()
-                        print("🔍 ATT result: \(result.rawValue)")
-                    } else {
-                        print("🔍 ATTダイアログはスキップ（既に応答済み or 制限中）")
+                    if ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
+                        await ATTrackingManager.requestTrackingAuthorization()
                     }
                     // ATT応答後にAdMob SDKを初期化（1回だけ）
                     if !adMobStarted {
