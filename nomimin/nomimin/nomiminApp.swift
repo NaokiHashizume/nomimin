@@ -57,7 +57,7 @@ struct nomiminApp: App {
                     }
                     // ATT応答後にAdMob SDKを初期化（1回だけ）
                     if !adMobStarted {
-                        MobileAds.shared.start()
+                        await MobileAds.shared.start()
                         adMobStarted = true
                     }
                 }
