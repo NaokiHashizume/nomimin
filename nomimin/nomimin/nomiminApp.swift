@@ -20,12 +20,12 @@ struct nomiminApp: App {
     @State private var pendingJoinDocumentID: String?
     @State private var pendingConfirmedData: ParsedReservation?
 
+    #if os(iOS) && !targetEnvironment(simulator)
+    @State private var adMobStarted = false
+    #endif
+
     init() {
         FirebaseService.shared.configure()
-
-        #if os(iOS) && !targetEnvironment(simulator)
-        MobileAds.shared.start()
-        #endif
     }
 
     var body: some Scene {
@@ -54,6 +54,11 @@ struct nomiminApp: App {
                     try? await Task.sleep(for: .seconds(0.5))
                     if ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
                         await ATTrackingManager.requestTrackingAuthorization()
+                    }
+                    // ATT応答後にAdMob SDKを初期化（1回だけ）
+                    if !adMobStarted {
+                        MobileAds.shared.start()
+                        adMobStarted = true
                     }
                 }
             }
