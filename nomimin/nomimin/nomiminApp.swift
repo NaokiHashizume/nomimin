@@ -47,15 +47,17 @@ struct nomiminApp: App {
                     #endif
                 }
             }
-            .task {
-                // ATT ダイアログ表示（広告パーソナライズ許可）
-                #if os(iOS) && !targetEnvironment(simulator)
-                try? await Task.sleep(for: .seconds(1))
-                if ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
-                    await ATTrackingManager.requestTrackingAuthorization()
+            #if os(iOS) && !targetEnvironment(simulator)
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                Task {
+                    // アプリが完全にアクティブになってからATTダイアログを表示
+                    try? await Task.sleep(for: .seconds(0.5))
+                    if ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
+                        await ATTrackingManager.requestTrackingAuthorization()
+                    }
                 }
-                #endif
             }
+            #endif
             .onOpenURL { url in
                 if let parsed = ParsedReservation.fromURL(url) {
                     pendingConfirmedData = parsed
